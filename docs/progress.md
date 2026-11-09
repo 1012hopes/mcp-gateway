@@ -7,6 +7,7 @@
 | D1（提前于 11-09 完成） | 完成 | `canonical.py` + `record.py`，37 tests 通过；哈希覆盖未知字段、浮点与键序归一、`-0.0` 折叠、NaN 拒绝 | D2 |
 | D2（同日完成） | 完成 | `sink.py`（fail-closed，写失败回滚不留半行）+ `verify.py`（L1 先于 L2，报首个异常）+ `cli.py`；74 tests；样例 12 步轨迹 + 6 种篡改演示全检出 | D3 已并入 D2，接 D4 透传与 G1 |
 | D4（11-09） | 完成 | 官方 SDK 2.3 透传 + `sqlite_server` 自写上游；真实运行 5 次调用产出 5 条带 `offered` 的记录并 verify 通过；fail-closed 三段演示全 PASS；94 tests（14 条需 SDK，裸解释器 skip） | D5：多上游 + 注册表 + schema 归一 |
+| D5（11-09） | 完成 | `registry.py`（归一 / 命名 / 哈希 / 漂移）+ `dirty_schema_server`；两上游 10 个工具并存，`sqlite.query` 与 `dirty.query` 互不遮蔽；`freeze_schema.py --check` OK；136 tests | D6：生命周期接线 + 轨迹落盘 |
 
 ## D1 完成判据核对
 
@@ -67,3 +68,27 @@
 
 3. **`stop_check` 在 D4 恒为空**（`attempted=[]`、`hit=false`）。不是遗漏：`rules-v0` 还没有任何规则，写空比写"看似在判"诚实。字段存在性由 `test_stop_check_is_present_and_empty_at_d4` 守着，D7 接入 R1/R3 后这里必须非空。
 4. **`truncated` 只按结果体积标记（>1MB），尚未真正截断。** 截断必须与证据抽取一起做，否则半份数据会被当成完整证据——那是 D9 的事。提前标 `truncated=true` 不会误导，提前截断会。
+
+## D5 完成判据核对
+
+| 判据（`PLAN.md`） | 结果 |
+|---|---|
+| 两上游并存、工具名无冲突 | 10 个工具、两个前缀 `{sqlite, dirty}`、名字全局唯一；同名短名 `sqlite.query` / `dirty.query` 共存（`test_same_short_name_from_two_upstreams_coexists`） |
+| `schema_hash` 跨重启稳定 | 两次独立 spawn 两个上游，manifest 完全一致（`test_hashes_are_identical_across_two_process_starts`）；`scripts/freeze_schema.py --check` 报 OK |
+| `$ref` / `oneOf` 归一后不为空 | `dirty.set_mode` 线上 schema 有 3 个 properties（`test_dirty_schema_reaches_the_wire_normalized`）；`dirty.query` 的两层 `$ref` 被内联、`$defs` 被剥离并记 `resolved-refs:2` |
+
+## D5 的四个发现
+
+**1. SDK 会先一步拒收一部分脏 schema。** 第一次跑冻结脚本直接失败：`tools.1.inputSchema.type Field required`——顶层缺 `type` 的 schema **根本发不出去**，客户端收到的是 `Handler returned an invalid result`。这修正了一个隐含假设：不是所有脏 schema 都能到达网关，stdio + 官方 SDK 这一层已经过滤掉一类。处理方式：dirty server 改成"可传输的脏"（其余五种缺陷都保留），而 registry 的这套归一逻辑仍然保留并有单测覆盖——别的 SDK、旧版本 server、直连 HTTP 场景都会把它们发出来。
+
+**2. 归一化不是格式化，是"让工具可被调用"。** `additionalProperties: false` 且 `required` 不在 `properties` 里，严格客户端连参数都传不进去——这个工具从构造上就是不可调用的。补一条无约束的 property 属于修可达性，不是猜类型，所以 note 写 `required-not-in-properties:flag` 而不是"已修复"。
+
+**3. `oneOf` 的合并必须区分两种信息。** 属性名是**可见性**（不合并，模型就以为没有参数），`required` 是**约束**（只能取交集，取并集就是撒谎）。类型冲突的字段保留成 `anyOf`，原始 `oneOf` 一律不动——网关本来就不做参数校验，展示层弱化一点可以，改写约束不行。
+
+**4. 冻结是"改上游就要显式提交一次"。** `config/schema-manifest.json` 入库后，任何 schema 变化都会让对应工具从 `offered` 里消失，调用返回 `block_schema_drift` 并照常写轨迹。这是设计要的行为（历史轨迹可比性优先），但它意味着 D9 加工具时必须重跑 `freeze_schema.py`，否则会看到"工具忽然不见了"。已写进 README 的日常工作流。
+
+## D5 追加的三条偏差
+
+5. **`dirty_schema_server` 从 D13 提前到 D5。** D5 的判据"`$ref/oneOf` 归一后不为空"没有脏上游就无法验收；先写它省一次返工，D13 只剩 `weird_capability_server` 与 `slow_flaky_server`。
+6. **`digest_of` 从 `session.py` 移到 `trace/canonical.py`。** trace 与 registry 现在都要算摘要，两份实现迟早会在浮点或键序上分叉，而摘要不一致是没人会发现的对比 bug。
+7. **删掉 `config.max_tools`。** 它在 D4 只是"取前 N 个"，从未真正做过准入；真正的 K 是 D14 的 gating，届时要连同 `offered` 的子集语义一起设计。留一个"看起来在控制上下文、实际只是截断"的开关比没有更危险。

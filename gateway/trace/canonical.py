@@ -25,6 +25,7 @@ would corrupt content that must stay verbatim.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from typing import Any, FrozenSet, Iterable, Mapping
@@ -37,6 +38,7 @@ __all__ = [
     "normalize",
     "canonical_bytes",
     "canonical_text",
+    "digest_of",
 ]
 
 
@@ -133,3 +135,14 @@ def canonical_text(
     return canonical_bytes(
         obj, drop_keys=frozenset(drop_keys), float_ndigits=float_ndigits
     ).decode("utf-8")
+
+
+def digest_of(payload: Any) -> str:
+    """Stable digest of any JSON-able payload.
+
+    Lives here rather than next to the session because two different layers need
+    the *same* function: the trace hashes arguments and results, the registry
+    hashes tool schemas. Two implementations would slowly diverge, and a digest
+    that differs between the two is a comparison bug nobody notices.
+    """
+    return hashlib.sha256(canonical_bytes(payload)).hexdigest()

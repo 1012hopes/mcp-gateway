@@ -3,13 +3,20 @@
     "name": "mcp-gateway",
     "trace_dir": "traces/runs",
     "model_id": "unlabeled-agent",
-    "max_tools": null
+    "schema_manifest": "config/schema-manifest.json"
   },
   "upstreams": [
     {
       "name": "sqlite",
       "command": "{python}",
       "args": ["-m", "mcp_servers.sqlite_server", "--db", "var/demo.sqlite3"],
+      "cwd": "{root}",
+      "call_timeout_s": 20
+    },
+    {
+      "name": "dirty",
+      "command": "{python}",
+      "args": ["-m", "mcp_servers.dirty_schema_server"],
       "cwd": "{root}",
       "call_timeout_s": 20
     }

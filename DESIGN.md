@@ -357,7 +357,7 @@ mcp-gateway/
 ├── tasks/               # 20 条任务 + checker + good/bad 样本
 ├── config/
 │   ├── gateway.json     # 上游、K、预算（JSON 而非 YAML：零依赖、可 diff）
-│   ├── rules.yaml       # ★ 规则开关与参数（w=2 等）
+│   ├── rules.json       # ★ 规则开关与参数（w=2 等）
 │   └── evidence.json    # 冻结的证据模型
 ├── traces/              # 运行产物（samples/ 入库，runs/ 与 demo/ 忽略）
 ├── scripts/
@@ -366,6 +366,7 @@ mcp-gateway/
 │   ├── make_sample.py   # 可复现的 12 步基线样例
 │   ├── tamper_demo.py   # 8 种篡改 + 1 个已知盲区
 │   ├── experiment.py    # 基线/网关对照
+│   ├── freeze_schema.py # 冻结工具契约 / --check 检查漂移（D5）
 │   └── freeze_evidence.py
 └── DESIGN.md
 ```
@@ -503,6 +504,7 @@ RUNNING
 2. **结果截断必须带标记**：> 1MB 截断后若不写 `truncated=true`，A3 会把"半个 rows"判成完整证据 → 误停。
 3. **schema 漂移显式告警**：上游升级导致 `schema_hash` 变化时，**启动即告警并冻结该工具**，不静默继续（否则历史轨迹不可比）。
 4. **协议版本不匹配要 fail fast**：半可用的网关比拒绝启动更危险——它会产出一批看起来正常、实际缺证据的轨迹。
+5. **传输层会先过滤一类脏 schema（D5 实测）**：顶层缺 `type` 的 `inputSchema` 在官方 SDK 下无法序列化，客户端拿到的是 `Handler returned an invalid result`，这个 schema 永远到不了 registry。含义是：**兼容层的边界不由我们决定，由传输栈决定**。registry 仍然处理这种 schema（其他 SDK / 旧 server / 直连 HTTP 会发出来），但不能假设"脏上游一定连得上"——验收时要用可传输的脏，否则测的是一段永远走不到的代码。
 
 #### 风险清单（同步进 README 局限）
 

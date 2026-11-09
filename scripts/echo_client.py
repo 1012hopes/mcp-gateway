@@ -75,6 +75,7 @@ async def drive(
         "run_id": run_id,
         "trace_path": trace_path,
         "tools": [],
+        "schemas": {},
         "calls": [],
         "error": None,
     }
@@ -85,6 +86,9 @@ async def drive(
             outcome["protocol"] = init.protocol_version
             tools = await session.list_tools()
             outcome["tools"] = [tool.name for tool in tools.tools]
+            outcome["schemas"] = {
+                tool.name: dict(tool.input_schema or {}) for tool in tools.tools
+            }
             for name, arguments in calls:
                 result = await session.call_tool(name, arguments)
                 outcome["calls"].append(

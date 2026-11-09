@@ -27,6 +27,7 @@ from typing import List, Optional
 import anyio
 
 from .config import GatewayConfig, load_config, repo_root
+from .registry import RegistryError, load_baseline
 from .session import RunSession, new_run_id, new_session_id
 from .trace.sink import JsonlSink, TraceChainError, TraceWriteError
 from .transport import Gateway
@@ -111,10 +112,28 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         for spec in config.upstreams
     ]
-    gateway = Gateway(config, upstreams, session)
+
+    # A malformed baseline is fatal on purpose: without it, drift detection is
+    # silently off, and traces written today become incomparable with yesterday's
+    # without anyone noticing. Refusing to start is the cheaper failure.
+    try:
+        baseline = load_baseline(config.schema_manifest)
+    except (OSError, ValueError, RegistryError) as exc:
+        _log(f"schema baseline error ({config.schema_manifest}): {exc}")
+        return EXIT_USAGE
+
+    try:
+        gateway = Gateway(config, upstreams, session, baseline=baseline)
+    except ValueError as exc:
+        _log(f"config error: {exc}")
+        return EXIT_USAGE
 
     _log(f"gateway {session.gateway_version} | run={session.run_id} | {session.trace_path}")
     _log(f"upstreams: {', '.join(u.name for u in upstreams)} | rules={session.rules_version}")
+    _log(
+        "schema baseline: "
+        + ("frozen, drift will freeze tools" if baseline is not None else "absent (no drift check)")
+    )
 
     try:
         anyio.run(_serve, gateway)

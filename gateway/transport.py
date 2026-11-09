@@ -14,9 +14,9 @@ gets called. Three consequences, in order of how easy they are to get wrong:
 
 3. **``offered`` is captured, not inferred.** It is the set of tools the agent
    could have picked from *at that moment*. Without it "was the wrong tool
-   chosen" has no denominator -- Accuracy@K is uncomputable (DESIGN 2.4). D4
-   exposes everything, so ``offered`` is the full list; D14 will make it a
-   subset by gating, and the field already holds the right meaning either way.
+   chosen" has no denominator -- Accuracy@K is uncomputable (DESIGN 2.4). The
+   registry decides membership, so ``offered`` is exactly what ``tools/list``
+   returned; D14 will shrink it by gating and the field keeps its meaning.
 
 Handlers are plain methods rather than closures so that the fail-closed path can
 be driven in-process by tests and by ``scripts/failclosed_demo.py`` without a
@@ -25,18 +25,20 @@ subprocess in the way.
 
 from __future__ import annotations
 
+import sys
 import time
 from contextlib import AsyncExitStack
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
 from .config import GatewayConfig
-from .session import MAX_RESULT_BYTES, RunSession, digest_of
+from .registry import Registry, ToolEntry, build_registry
+from .session import MAX_RESULT_BYTES, RunSession
 from .trace.sink import TraceChainError, TraceWriteError
-from .upstream import StdioUpstream, UpstreamFailure, UpstreamTool, tail_of_exception
+from .upstream import StdioUpstream, UpstreamFailure, tail_of_exception
 from .version import GATEWAY_VERSION
 
 __all__ = ["Gateway", "result_payload", "text_result", "error_result"]
@@ -66,39 +68,50 @@ class Gateway:
         upstreams: Sequence[StdioUpstream],
         session: RunSession,
         *,
+        baseline: Optional[Mapping[str, str]] = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.config = config
         self.upstreams = list(upstreams)
         self.session = session
         self._clock = clock
-        self._tools: Optional[List[UpstreamTool]] = None
+        self._baseline = baseline
+        self._registry: Optional[Registry] = None
+        self._by_upstream: Dict[str, StdioUpstream] = {}
+        for upstream in self.upstreams:
+            if upstream.name in self._by_upstream:
+                # Two servers under one prefix would silently shadow each other
+                # and make ``chosen`` ambiguous in every trace written afterwards.
+                raise ValueError(f"duplicate upstream name: {upstream.name!r}")
+            self._by_upstream[upstream.name] = upstream
 
     # -- tool surface ------------------------------------------------------
 
-    async def list_all_tools(self, *, refresh: bool = False) -> List[UpstreamTool]:
-        if self._tools is not None and not refresh:
-            return self._tools
-        tools: List[UpstreamTool] = []
-        for upstream in self.upstreams:
-            tools.extend(await upstream.list_tools(refresh=refresh))
-        if self.config.max_tools is not None:
-            tools = tools[: self.config.max_tools]
-        self._tools = tools
-        return tools
+    async def registry(self, *, refresh: bool = False) -> Registry:
+        """List every upstream once, then normalize/namespace/hash the union."""
+        if self._registry is not None and not refresh:
+            return self._registry
+        listing = [
+            (upstream.name, await upstream.list_tools(refresh=refresh))
+            for upstream in self.upstreams
+        ]
+        registry = build_registry(listing, baseline=self._baseline)
+        self._registry = registry
+        # stderr, never stdout: stdout is the JSON-RPC stream. A warning that
+        # lands in the protocol stream looks like a hung client, not a warning.
+        for note in registry.warnings():
+            print(f"registry: {note}", file=sys.stderr, flush=True)
+        return registry
 
-    def _upstream_for(self, exposed_name: str) -> StdioUpstream:
-        for upstream in self.upstreams:
-            if exposed_name.startswith(upstream.name + "."):
-                return upstream
-        known = ", ".join(u.name for u in self.upstreams)
-        raise UpstreamFailure(f"unknown tool {exposed_name!r}; upstreams: {known}")
+    async def list_all_tools(self, *, refresh: bool = False) -> List[ToolEntry]:
+        """The tools the agent may pick from right now (frozen ones excluded)."""
+        return list((await self.registry(refresh=refresh)).offered)
 
     # -- MCP handlers ------------------------------------------------------
 
     async def handle_list_tools(self, ctx: Any, params: Any) -> types.ListToolsResult:
-        tools = await self.list_all_tools()
-        return types.ListToolsResult(tools=[tool.to_mcp() for tool in tools])
+        registry = await self.registry()
+        return types.ListToolsResult(tools=[entry.to_mcp() for entry in registry.offered])
 
     async def handle_call_tool(
         self, ctx: Any, params: types.CallToolRequestParams
@@ -113,13 +126,31 @@ class Gateway:
                 f"run aborted ({session.abort_reason}); no further calls are accepted"
             )
 
+        registry = await self.registry()
         chosen = params.name
-        offered = [tool.exposed_name for tool in await self.list_all_tools()]
+        offered = registry.offered_names()
+        entry = registry.get(chosen)
         started = self._clock()
+        decision = "forward"
 
         try:
-            upstream = self._upstream_for(chosen)
-            result = await upstream.call_tool(chosen, params.arguments)
+            if entry is None:
+                decision = "block_unknown_tool"
+                raise UpstreamFailure(
+                    f"unknown tool {chosen!r}; offered: {', '.join(offered) or '(none)'}"
+                )
+            if entry.frozen:
+                # The upstream changed its contract since the baseline was
+                # frozen. Serving it would put incomparable traces in the same
+                # file; refusing keeps the comparison honest (DESIGN 2.6 pitfall 3).
+                decision = "block_schema_drift"
+                raise UpstreamFailure(
+                    f"{chosen} is frozen: {entry.drift}. Re-freeze the baseline "
+                    f"only after deciding the old traces stay comparable."
+                )
+            result = await self._by_upstream[entry.upstream].call_tool(
+                entry.original_name, params.arguments
+            )
             payload = result_payload(result)
             is_error = bool(result.is_error)
             response = result
@@ -138,7 +169,7 @@ class Gateway:
                 args=dict(params.arguments or {}),
                 result=payload,
                 latency_ms=latency_ms,
-                decision="forward",
+                decision=decision,
                 state=session.state,
                 truncated=truncated,
             )

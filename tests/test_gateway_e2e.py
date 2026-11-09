@@ -62,9 +62,33 @@ class GatewayEndToEndTests(unittest.TestCase):
         cls._tmp.cleanup()
 
     def test_tools_are_namespaced_by_upstream(self):
-        self.assertEqual(len(self.outcome["tools"]), 4)
+        names = self.outcome["tools"]
+        self.assertEqual(len(names), 10)
+        self.assertEqual(len(set(names)), len(names), "exposed names must be unique")
+        for name in names:
+            self.assertEqual(name.count("."), 1, name)
+        self.assertEqual({name.split(".")[0] for name in names}, {"sqlite", "dirty"})
+
+    def test_same_short_name_from_two_upstreams_coexists(self):
+        # The reason namespacing exists at all: both servers ship a ``query``.
+        names = self.outcome["tools"]
+        self.assertIn("sqlite.query", names)
+        self.assertIn("dirty.query", names)
+
+    def test_dirty_schema_reaches_the_wire_normalized(self):
+        # A tool whose arguments live only inside ``oneOf`` variants must not be
+        # exposed as taking no arguments -- the model would call it empty.
+        schema = self.outcome["schemas"]["dirty.set_mode"]
+        self.assertIn("properties", schema)
+        self.assertEqual(
+            sorted(schema["properties"]), ["budget_ms", "mode", "statement"]
+        )
+        self.assertEqual(schema["required"], ["mode"])
+
+    def test_escaped_and_truncated_names_are_legal(self):
         for name in self.outcome["tools"]:
-            self.assertTrue(name.startswith("sqlite."), name)
+            self.assertLessEqual(len(name), 64, name)
+            self.assertRegex(name, r"^[A-Za-z0-9_.-]+$")
 
     def test_calls_reach_the_upstream_and_return_data(self):
         self.assertEqual(len(self.outcome["calls"]), len(CALLS))

@@ -1,0 +1,15 @@
+{
+  "tools": {
+    "dirty._u5de5_u5177_u67e5_u8be2": "020b39fabb366bebfc8b9eade5bc0eb5402edd9c3cebf975c59a99e71ba17f67",
+    "dirty.query": "adcc9c34470bbf5a96290e69b8a8efa65c0e022fe27a3908522acc6e88c146c7",
+    "dirty.set_flag": "779d452379372c4dc2324acc80eef015e1bec55eb5044a136e2b0f92fa764bd7",
+    "dirty.set_mode": "8605fa96a120d23eb9ff2edb4c5fe946f19ed9e65860cccebea2af41c311a177",
+    "dirty.status": "cad0fc8f3c2c6b9e8517f8efbe66aa5db41f264b7ea09e5475ffbdc0e2900c66",
+    "dirty.tool_with_a_name_long_enough_to_overflow_the_limit_on-4f8a": "55014a454826baafaa4ee520be0b1986980ad25a41355bf3e6e24d55f62a4325",
+    "sqlite.count_rows": "63260a8ee3deb67f35a0c55ba14c00d5490d34c4e0f4c9ed995eb652b51aabff",
+    "sqlite.describe_table": "0d1b98122ffadc3e063c83518a0daa93b8cefbbc033b7c3c23e99d1e006b2738",
+    "sqlite.list_tables": "7d9c58f1f120a6e5d41bce346033c88ecb22868b5a9e3a77f26106830a7e100b",
+    "sqlite.query": "544094887376e17f0abd20a47ba3111c4eee2ba88f19e2571f5fd293b5196644"
+  },
+  "version": 1
+}

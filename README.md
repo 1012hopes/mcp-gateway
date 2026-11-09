@@ -7,7 +7,7 @@
 
 一句话概括差异化：**别的网关管"谁能调"，这个管"什么时候该停"，并且能证明那次停是对的。**
 
-> 状态：**D4 / D18**（轨迹层 + 单上游透传 + fail-closed 已跑通，尚无终止判据）。进度见 [`PLAN.md`](PLAN.md) 与 [`docs/progress.md`](docs/progress.md)。
+> 状态：**D5 / D18**（轨迹层 + 多上游透传 + 工具面归一 + fail-closed 已跑通，尚无终止判据）。进度见 [`PLAN.md`](PLAN.md) 与 [`docs/progress.md`](docs/progress.md)。
 
 ## 它解决什么问题
 
@@ -39,8 +39,9 @@ recursion_limit = 25  # LangGraph
 | D1 | 记录结构 + canonical 序列化 | ✅ |
 | D2 | 写入（fail-closed）+ verify 首错定位 | ✅ |
 | D3 | 篡改用例（6 处 + 2 个进阶攻击） | ✅ 并入 D2 |
-| D4 | 单上游透传 + 真实轨迹 + **G1 演示** | ✅ 94 tests（14 条需 SDK，裸解释器自动跳过） |
-| D5–D8 | 四级判据 + 证据集 + **G2 演示** | 待做 |
+| D4 | 单上游透传 + 真实轨迹 + **G1 演示** | ✅ |
+| D5 | 多上游 + 工具面归一 + schema 漂移冻结 | ✅ 136 tests（14 条需 SDK，裸解释器自动跳过） |
+| D6–D8 | 四级判据 + 证据集 + **G2 演示** | 待做 |
 | D9–D12 | 20 条任务 + checker + **G3 指标表** | 待做 |
 
 ## 快速开始
@@ -58,6 +59,10 @@ uv run python scripts/failclosed_demo.py
 
 # 篡改演示：8 个用例，其中 1 个是文档记载的盲区
 uv run python scripts/tamper_demo.py --path traces/runs/<run>.jsonl
+
+# 工具面：冻结当前 schema 基线 / 检查上游是否改了契约
+uv run python scripts/freeze_schema.py
+uv run python scripts/freeze_schema.py --check
 ```
 
 不带 `uv` 时用虚拟环境里的解释器：`.venv\Scripts\python.exe scripts\echo_client.py`。
@@ -72,6 +77,27 @@ python -m gateway.trace verify traces/samples/demo-12-steps.jsonl
 ```
 
 **为什么轨迹层零依赖**：它是整个项目的证据底座，不该因为某个包升级而写不出记录。`upstream.py` / `transport.py` 才依赖官方 MCP SDK（`mcp>=2.3`）。
+
+## 工具面：归一化不是格式化，是"让工具可被调用"
+
+对着两个上游、10 个工具跑，其中一个专门不合规（`mcp_servers/dirty_schema_server.py`）：
+
+| 上游缺陷 | 不处理的后果 | 处理 |
+|---|---|---|
+| `$ref` 经 `$defs` 两层嵌套 | 模型看到 `{"$ref": ...}`，参数全靠猜 | 内联后剥离 `$defs`，记 `resolved-refs:N` |
+| 参数只写在 `oneOf` 分支里 | 顶层 `properties` 为空 → 模型以为这个工具不要参数 | 合并属性名；`required` **只取交集**；原 `oneOf` 不动 |
+| `additionalProperties: false` 但 `required` 不在 `properties` | 严格客户端连参数都传不进去，工具**不可调用** | 补一条无约束 property，记 `required-not-in-properties:x` |
+| 非 ASCII 工具名 | 名字不合法 | 转 `_uXXXX`；原值留在 `original_name` 供调用 |
+| 名字超 64 字符 | 加前缀后必超限 | 截断 + 4 位哈希后缀；**前缀不截**，否则看不出是哪个上游 |
+| 2 kB description | 撑爆上下文 | 只归一空白，不截断；长度归 gating 管（D14） |
+
+三条硬规矩：
+
+- **哈希只覆盖模型真正看到的东西**：归一后的 schema + 归一后的 description。反过来（哈希原文、展示归一稿）会让"这条轨迹对应哪个契约"永久失配。
+- **改上游 schema 就重跑 `scripts/freeze_schema.py`**：`config/schema-manifest.json` 入库即契约，hash 变了工具就从 `offered` 里消失，调用返回 `block_schema_drift` 并照常记录。
+- **归一化不碰约束语义**：网关不校验参数，校验是上游的事。合并 `oneOf` 只补"名字可见性"，`required` 取交集而不是并集——取并集就是替上游撒谎。
+
+写这套东西时撞到一件值得记的事：**顶层缺 `type` 的 schema 在官方 SDK 下根本发不出来**，客户端收到 `Handler returned an invalid result`。所以"上游能脏到什么程度"取决于传输层——registry 仍处理这种 schema（有单测），因为别的 SDK、旧版本 server、直连 HTTP 场景都会把它发出来。
 
 ## fail-closed 是唯一能挡"漏记"的东西
 
@@ -95,19 +121,23 @@ gateway/
   __main__.py        唯一装配点：先开 sink，再连上游（开不了就退出）
   config.py          配置解析（{python} / {root} 替换）
   session.py         RunSession：run 级状态与唯一写轨迹入口
+  registry.py        工具面：schema 归一、命名空间、schema_hash、漂移冻结
   transport.py       MCP server 侧：list / call 分发，记录成功后才交付结果
-  upstream.py        MCP client：stdio 连接、命名空间、schema_hash
+  upstream.py        MCP client：stdio 连接，只负责通信，不做归一
   trace/canonical.py 确定性序列化（键序、浮点、UTF-8、拒绝 NaN）
   trace/record.py    TraceRecord + StopCheck + 哈希链入口
   trace/sink.py      fail-closed 写入（写失败回滚，不留半行）
   trace/verify.py    双层校验：L1 完整性 → L2 结构，报首个异常
   trace/cli.py       verify 命令（退出码 0/1，可进 CI）
-mcp_servers/sqlite_server.py  只读 SQLite 上游（自写，数据固定可复现）
-config/gateway.json           上游、trace 目录、模型标识
-scripts/echo_client.py        端到端驱动
-scripts/failclosed_demo.py    G1 的 S1/S2/S3
-scripts/tamper_demo.py        8 个篡改用例
-docs/demo-g1.md               G1 台词与录屏脚本
+mcp_servers/sqlite_server.py        只读 SQLite 上游（数据固定可复现）
+mcp_servers/dirty_schema_server.py  故意不合规的上游（$ref / oneOf / 非法名）
+config/gateway.json                 上游、trace 目录、模型标识
+config/schema-manifest.json         冻结的工具契约（入库，改上游后重跑冻结）
+scripts/echo_client.py              端到端驱动
+scripts/failclosed_demo.py          G1 的 S1/S2/S3
+scripts/tamper_demo.py              8 个篡改用例
+scripts/freeze_schema.py            冻结 / `--check` 检查 schema 漂移
+docs/demo-g1.md                     G1 台词与录屏脚本
 ```
 
 ## 三个设计决定，值得单独说
@@ -116,7 +146,7 @@ docs/demo-g1.md               G1 台词与录屏脚本
 
 **未知字段必须存活。** 旧代码读到新字段时若丢弃不写，字节就变了，链当场断——所以 `from_dict` 保留未知字段，`to_dict` 原样还回去。这条有测试守着。
 
-**工具名先命名空间化。** 暴露给模型的是 `sqlite.query`，而不是 `query`。事后加前缀会改写全部历史 `chosen` 值，把所有跨 run 对比作废——这类改动必须第一天做。
+**工具名先命名空间化。** 暴露给模型的是 `sqlite.query`，而不是 `query`。事后加前缀会改写全部历史 `chosen` 值，把所有跨 run 对比作废——这类改动必须第一天做。现在两个上游各有一个 `query`，这条从假设变成了每天都会跑到的东西。
 
 ## Related work
 
@@ -131,6 +161,7 @@ docs/demo-g1.md               G1 台词与录屏脚本
 - **链只能检出局部改动**：有写权限者可把改后记录的后续 `prev_hash`/`hash` 全部重算，链依然自洽；删掉尾部 N 行同样检不出。要封住这两个口子需外部锚定（链头签名、只追加日志、把末条 `hash` 打进 git tag）。`verify` 成功时会打印这条限制，不让"链完整"被读成"无遗漏"
 - **中途写失败的那次调用已经执行过了**：结果不会交给模型，但上游副作用无法回滚。所以只读工具可以放心重试，写操作需要上游侧幂等（`DESIGN` FR-17）
 - 工具返回内容会进模型上下文，存在提示注入面，只能约束"结果不解析为控制流"
+- **schema 漂移时工具直接消失**：从 `offered` 移除、调用返回 `block_schema_drift`，而不是降级继续。这是刻意的（历史轨迹可比性优先），但现场看起来像"网关坏了"，所以 `registry: schema-drift:...` 会打到 stderr
 - 参数在 20 条任务上标定，样本量不做显著性检验，只报配对差值
 
 ## License

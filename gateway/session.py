@@ -26,13 +26,12 @@ this object rather than being threaded through the transport.
 
 from __future__ import annotations
 
-import hashlib
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .trace.canonical import canonical_bytes
+from .trace.canonical import digest_of
 from .trace.record import StopCheck, TraceRecord
 from .trace.sink import JsonlSink
 from .version import GATEWAY_VERSION, RULES_VERSION, UNKNOWN_MODEL_ID
@@ -44,11 +43,6 @@ __all__ = ["RunSession", "digest_of", "new_run_id", "new_session_id"]
 #: payload is not a complete evidence item, otherwise a half-returned row set
 #: reads as "evidence present" and the run halts early (DESIGN 2.6 pitfall 2).
 MAX_RESULT_BYTES = 1_000_000
-
-
-def digest_of(payload: Any) -> str:
-    """Stable digest of any JSON-able payload."""
-    return hashlib.sha256(canonical_bytes(payload)).hexdigest()
 
 
 def new_run_id() -> str:

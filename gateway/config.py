@@ -52,7 +52,7 @@ class GatewayConfig:
     name: str = "mcp-gateway"
     trace_dir: Path = REPO_ROOT / "traces" / "runs"
     model_id: str = "unlabeled-agent"
-    max_tools: Optional[int] = None
+    schema_manifest: Path = REPO_ROOT / "config" / "schema-manifest.json"
     upstreams: List[UpstreamSpec] = field(default_factory=list)
 
     @property
@@ -97,6 +97,6 @@ def load_config(path: Optional[str] = None) -> GatewayConfig:
         name=gateway.get("name", "mcp-gateway"),
         trace_dir=_path(gateway.get("trace_dir", "traces/runs")),
         model_id=gateway.get("model_id", "unlabeled-agent"),
-        max_tools=gateway.get("max_tools"),
+        schema_manifest=_path(gateway.get("schema_manifest", "config/schema-manifest.json")),
         upstreams=specs,
     )

@@ -152,7 +152,7 @@
 
 - 鉴权、多租户、RBAC —— 这是"有人做过"的部分，只写进 README 的未来工作
 - 分布式部署、高可用、多副本
-- 支持 SSE / streamable-http 全协议 —— 只做 stdio 透传
+- 传输全兼容 —— 只做 stdio server 侧 + stdio/HTTP client 侧，不做 SSE 全兼容与 OAuth（见 2.6）
 - 向量数据库 —— 工具数量 < 100，BM25 足够且更可解释
 - 图形界面 —— 终端表格 + JSON 足够
 - 用 LLM 判定任务是否完成 / 是否该停 —— **一旦引入，整个可验证性叙事崩塌**
@@ -278,6 +278,45 @@ RUNNING
 ```
 
 `DEGRADED` 是必要设计：否则某一类证据永远取不到时，任务会跑到预算上限才停，误判为"停晚了"。
+
+### 2.6 连通性与兼容性策略
+
+**定位**：连通性是**入场券**，兼容性是**信任成本**。两者都不是差异化——在这一维上永远赢不了 tbxark/mcp-proxy 这类做了两年协议适配的项目，也不该赢。目标是"不拖后腿"：连得上、不崩、证据抽得出。
+
+#### 三层兼容，权重不同
+
+| 层 | 内容 | 投入 | 不做的后果 |
+|---|---|---|---|
+| 传输层 | server 侧 stdio；client 侧 stdio + HTTP | 0.5 天 | 只能接本地 server，"生产怎么接"直接卡住 |
+| 协议层 | `initialize` 版本协商、capabilities 双侧声明、`list_changed` 通知、错误码归一 | 1 天 | 遇到版本不匹配或只声明 tools 的上游时直接崩 |
+| **语义层** | schema 归一（`$ref` / `oneOf` / `enum` / `additionalProperties`）、命名冲突、**结果形状归一** | 1 天 | **A3 抽不出 ev_type，证据完备判据整体失效** |
+
+**关键连带关系**：语义层不是杂活，是 A3 的前置条件。证据抽取靠"结果 JSON 的字段签名匹配"（见 A3），字段签名来自归一化后的结果结构。兼容层做浅了，核心算法就是空的——**这也是为什么本项目不能只做 stdio 裸透传**。
+
+#### 三个 fake server 作为兼容性测试（成本最低、说服力最高的 demo）
+
+每个 30–50 行，故意脏：
+
+| server | 制造的问题 | 验证点 |
+|---|---|---|
+| `dirty_schema_server` | `$ref` + `oneOf`、超长 description、非 ASCII 工具名、`additionalProperties: false` 但必填项不在 properties 里 | registry 不崩，schema_hash 稳定 |
+| `weird_capability_server` | 只声明 tools 不声明 resources；乱发 `list_changed`；非标准错误码；返回 `null` 而非空对象 | 协商降级而非失败；通知去抖 |
+| `slow_flaky_server` | 20% 超时、偶发空结果、单次结果 > 1MB | 超时重试 + 截断标记 `truncated` 不污染证据判定 |
+
+演示语句：**"接到三个故意不合规的 server 上，网关不崩，且证据抽取结果与干净上游一致。"** 接官方 server 是顺利路径，任何人都会做；脏上游下的稳定性才是工程。
+
+#### 实现上必踩的四个坑
+
+1. **JSON-RPC id 冲突**：多上游的 `id` 必然重复，网关必须维护 `(upstream, orig_id) ↔ gw_id` 双向映射表，否则响应串号。
+2. **结果截断必须带标记**：> 1MB 截断后若不写 `truncated=true`，A3 会把"半个 rows"判成完整证据 → 误停。
+3. **schema 漂移显式告警**：上游升级导致 `schema_hash` 变化时，**启动即告警并冻结该工具**，不静默继续（否则历史轨迹不可比）。
+4. **协议版本不匹配要 fail fast**：半可用的网关比拒绝启动更危险——它会产出一批看起来正常、实际缺证据的轨迹。
+
+#### 风险清单（同步进 README 局限）
+
+- 工具名加命名空间前缀后可能超出上游长度限制 → 截断 + 4 位哈希后缀
+- 不支持 sampling / elicitation / roots 透传 → 上游若依赖这些能力会静默降级，需在 `tools/list` 响应里标注
+- 不做 SSE 全兼容与 OAuth → 点名 Kong / casdoor 已覆盖，属主动取舍
 
 ---
 

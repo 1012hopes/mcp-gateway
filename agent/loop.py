@@ -97,7 +97,7 @@ async def run_task(
     trace_dir = Path(trace_dir) if trace_dir else load_config().trace_dir
     trace_path = trace_dir / f"{run_id}.jsonl"
 
-    args = ["--run-id", run_id, "--trace-dir", str(trace_dir)]
+    args = ["--run-id", run_id, "--trace-dir", str(trace_dir), "--task-id", task.id]
     if model_id:
         args += ["--model-id", model_id]
     args += task.gateway_args()

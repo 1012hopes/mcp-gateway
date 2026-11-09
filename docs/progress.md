@@ -12,6 +12,7 @@
 | D7（11-09） | 完成 | `stop/normalize.py` + `rules/duplicate.py` + `rules/budget.py`；同一任务 **9 步 → 5 步**：R1 在第 5 步命中并回填第 3 步的结果（`result_digest` 相等）；`--max-calls 3` 的 run 由 R3 在第 3 步收束；241 tests | D8：R2 无进展 + 规则注册表完整化 |
 | D8（11-09） | 完成 | `rules/no_progress.py` + `stop_check.state_hash`（schema v1→v2）+ 对抗任务 `t02`；**G2：11 步 → 3 步**，R2 在第二个相同答案处收束，基线 11 步全程无逐字重复（证明不是 R1 抓的）；271 tests | D9：证据模型 + R4 + DEGRADED |
 | D9（11-09） | 完成 | `gateway/evidence.py` + `config/evidence.json` + `rules/evidence_complete.py`（R4）+ `rules/unreachable.py`（R6，`DEGRADED`）；t01 **9 步 → 4 步**，R4 在最后一项证据到达处收束，checker 独立复核交付结果；缺生产者的配置 **1 步**收束、零上游调用；331 tests | D10：run 边界 + 脱敏顺序 + 串行化 |
+| D10（11-09） | 完成 | `gateway/boundary.py`（`_meta.gateway` 声明）+ `gateway/policy.py`（先脱敏再哈希）+ `session.next_run` + `handle_call_tool` 串行锁 + schema v2→v3（`task_id`）；`boundary_demo.py` **12 项自检全 PASS**：不声明 → 第二个话题被 R1 误停，声明 → 三 run 三文件、追问 `evidence_added=[]` 零重读、换题重新读；384 tests | D11：20 条任务集 + 人工最优步数 |
 
 ## D1 完成判据核对
 
@@ -231,3 +232,31 @@ old formula: steps where it would see an unchanged state: none
 17. **`StopContext` 新增 `available` / `unreachable`（计划里没有）。** 原计划让 R4 直接读证据集就够；但"证据不可得"需要知道**可用工具面**，而规则不该去摸注册表。改为 transport 用证据模型算一次，规则只读快照——和 `state_hash` 的处理方式一致。
 18. **`--require` 写错类型 → 拒绝启动（exit 2），不是降级。** 计划没写这条。若把未知类型当成"不可得"，每个任务都会在第 1 步 `DEGRADED`，而那种失败看起来像正常运行——正是 `DESIGN` 2.6 坑 4 说的"半可用的网关比拒绝启动更危险"。
 19. **三个 demo 的 `--run-id` 默认值改成随机。** 反复跑同一个 demo 时，`JsonlSink` 会**续写**已有链：文件仍然 verify 通过，但里面是两次 run 的记录，断言会莫名其妙地失败。默认唯一、显式指定即自负其责。
+
+## D10 完成判据核对
+
+| 判据（`PLAN.md`） | 结果 |
+|---|---|
+| 追问继承 | `boundary_demo.py`：follow-up 声明 `inherit + require=["sql.schema"]`，第一条记录 `evidence_added=[]`、`missing=[]`、`stop_check.hit=true`——**一步没查就完成了**，事实只能来自继承；`parent_run_id` 指向父 run。`WithBoundaryTests.test_a_follow_up_inherits_and_completes_without_reading_again` 同样断言 |
+| 换题重置（不误停） | 同一 demo 的第三段：`task=t02` 不带 `inherit`，`evidence_added=["sql.schema"]`（重新读过）、`parent_run_id=null`。反事实由 `WithoutBoundaryTests` 提供：同一串调用**不声明**时，第二个话题的第一句被 R1 判成重复，`state=HALTED_DUPLICATE` |
+| `redact → canonical → hash` 顺序有单测守护 | `tests/test_policy.py::PipelineTests`：断言身份等于 `digest_of(normalize_args(redact(args)))` **且不等于** `digest_of(normalize_args(args))`；另有幂等、不改入参、归一化仍在脱敏之后生效、`result_digest` 同样脱敏、以及 `NoOpTests`（真实查询/行集/信封脱敏前后逐字节相同） |
+| 串行化（FR-16，计划表外补的） | `test_lifecycle.py::SerializationTests`：`asyncio.gather` 三个调用 → `seq` 与 `turn` 都是 `[1,2,3]`，上游只被各调一次；另一半断言"排队不等于延后判定"——第二个调用看到第一个产生的 halt |
+
+## D10 的五个发现
+
+**1. `require` 缺省继承上一 run 的要求，会让换题带着旧判据。** 第一版 `_resolve_required` 在 `declaration.require is None` 时取 `current.required`。结果是：换题的新 run 继承了旧任务的 `require`，第一步就 `HALTED_COMPLETE`——**边界要防的假完成，只是换了个位置发生**。改成缺省取**进程启动时**的 `--require`。这条值得单独记，因为它说明边界的正确性不只取决于"重置了什么"，还取决于"新 run 从哪儿取默认值"。
+
+**2. 重复声明必须是 no-op，否则无状态客户端每调一次就开一个新 run。** 无状态客户端会把同一个 `_meta` 声明挂在**每一次**请求上（它不知道网关记不记得）。所以判据只能是 `task != current_task`，不能是"声明了就是边界"。
+
+**3. 边界之后不能往同一个文件追加。** 链的创世哈希由首条记录的 `run_id` 决定，第二个 run 追加进去，在文件里与"上一个 run 的继续"**无法区分**——而这恰是边界要消除的混淆。所以一个 run 一个文件，关系由 `parent_run_id` 与该记录的 `task_id` 承担。留了一个"空文件"的坑：如果首个调用就带声明，而 session 还没有任何记录，直接分叉会留下一个 0 记录、只能被 `verify` 判为 `empty` 的文件；改成**认领**（把声明写进当前 run）而不是分叉。
+
+**4. 边界检查必须在"已关闭"检查之前。** 否则一个已经 HALTED 的 run 会拒掉新话题的第一次调用——边界功能就只在不需要它的时候可用。`WithBoundaryTests.test_a_declaration_is_served_even_after_the_run_halted` 守这条。
+
+**5. 并发下 `turn` 比 `seq` 更早暴露问题。** `seq` 由 sink 的 `expected_next()` 保证连续，两个处理函数交错时它会**抛异常**（`seq out of order`），看起来像"偶发失败"；而 `turn` 是"读-加一"，没有锁时两个处理函数读到同一个值、各自加一，轨迹会声称两次调用发生在同一轮，**且不报错**。所以串行化的断言落在 `turn == [1,2,3]` 上。
+
+## D10 追加的四条偏差
+
+20. **边界触发方式改为协议字段 `_meta.gateway`（计划只说"session 补 reset/inherit"）。** CLI flag 不能中途改；控制工具会进 `offered`，污染 Accuracy@K 的分母；`_meta` 本来就是每请求的、且被网关剥掉不进参数。新增模块 `gateway/boundary.py` 承担解析与校验，`session.next_run` 承担分叉。
+21. **schema v2 → v3（`task_id` 可选键）。** 一个 run 一个文件之后，"哪个文件属于哪个任务"若无字段只能靠文件名或时序去猜。沿用 D8 的口径：可选键**缺省即不出现**，必需字段表与 v2 相同，`seal()` 只写 v3、可读 1/2/3。`traces/samples/demo-12-steps.jsonl` 随之重新生成（字节变化 12 行）。
+22. **脱敏落 `gateway/policy.py`（计划写 `policy/redact.py`），并扩展到 `result_digest`。** 目录里没有 `policy/`；`DESIGN` 2.2 原本就把"白名单 / 预算 / 审批 / 脱敏"放在 `gateway/policy.py`。FR-14 只说 `args_hash`，但两个只有返回凭据不同的答案否则永远不会看起来相同，R2 的平台期就永远形不成——同一个论证，扩到结果摘要。
+23. **`agent/loop.run_task` 现在会传 `--task-id`。** 一个进程一条任务时这是"声明"，也是后续 `_meta` 变化能被判定为边界的前提；不带它，第一次声明会被当成"从空到 t01"的边界。

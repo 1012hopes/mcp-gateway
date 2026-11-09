@@ -61,6 +61,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", default=None, help="override the generated run id")
     parser.add_argument("--session-id", default=None)
     parser.add_argument("--parent-run-id", default=None)
+    parser.add_argument(
+        "--task-id",
+        default=None,
+        help="the task this first run serves. A later _meta.gateway.task naming "
+        "a different task starts a new run (FR-12), with its own trace file",
+    )
     parser.add_argument("--model-id", default=None)
     parser.add_argument("--trace-dir", default=None)
     parser.add_argument(
@@ -124,6 +130,7 @@ def prepare(config: GatewayConfig, args: argparse.Namespace) -> RunSession:
         run_id=run_id,
         session_id=args.session_id or new_session_id(),
         parent_run_id=args.parent_run_id,
+        task_id=args.task_id,
         model_id=args.model_id or config.model_id or UNKNOWN_MODEL_ID,
         budget=Budget(max_calls=args.max_calls, max_wall_ms=args.max_wall_ms),
         required=set(args.require or ()),
@@ -209,7 +216,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         return EXIT_USAGE
 
     _log(f"gateway {session.gateway_version} | run={session.run_id} | {session.trace_path}")
-    _log(f"upstreams: {', '.join(u.name for u in upstreams)} | rules={session.rules_version}")
+    _log(
+        f"task: {session.task_id or '(undeclared)'} | "
+        f"upstreams: {', '.join(u.name for u in upstreams)} | rules={session.rules_version}"
+    )
     _log(
         f"evidence: {evidence.version} ({', '.join(evidence.types)}) | "
         f"required: {', '.join(sorted(session.required)) or '(none)'}"
@@ -224,18 +234,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     except KeyboardInterrupt:  # pragma: no cover
         pass
     finally:
-        session.sink.close()
-        stats = session.stats()
+        # The *last* run, not the one this function opened: a declared task
+        # change starts a new run with its own trace file (FR-12), and reporting
+        # the first one here would print stats for a run that ended hours ago.
+        final = gateway.session
+        final.sink.close()
+        stats = final.stats()
         _log("--- " + json.dumps(stats, ensure_ascii=False))
         # The invariant a reviewer should check: nothing was delivered that was
         # not recorded. It must hold both on a clean run and on an aborted one.
-        if session.results_delivered != session.records_written:
+        if final.results_delivered != final.records_written:
             _log(
                 "INVARIANT BROKEN: results_delivered != records_written "
-                f"({session.results_delivered} != {session.records_written})"
+                f"({final.results_delivered} != {final.records_written})"
             )
 
-    if session.aborted:
+    if final.aborted:
         return EXIT_ABORTED
     return EXIT_OK
 

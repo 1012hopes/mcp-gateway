@@ -23,16 +23,18 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .canonical import canonical_bytes
 
-#: v2 adds one optional nested key, ``stop_check.state_hash`` (D8). The payload
-#: field list is unchanged, so a v1 reader sees a valid record plus one field it
-#: keeps verbatim in ``_extra`` -- and because the key is *omitted* when absent,
-#: a v1 line read and rewritten by this version is byte-identical.
-CURRENT_SCHEMA_VERSION = 2
+#: v2 adds one optional nested key, ``stop_check.state_hash`` (D8); v3 adds one
+#: optional top-level key, ``task_id`` (D10). Both follow the same rule: the key
+#: is **omitted when absent**, so a record written under the older schema reads
+#: and rewrites byte-identically, and the payload field list is unchanged for
+#: both versions -- a reader that demanded the new key would reject every old
+#: line it was written to keep verifying.
+CURRENT_SCHEMA_VERSION = 3
 
 #: Versions this code can read. Writing is restricted to ``CURRENT``: old
 #: records must stay verifiable forever, new ones must never be minted with an
 #: old semantics.
-READABLE_SCHEMA_VERSIONS = (1, 2)
+READABLE_SCHEMA_VERSIONS = (1, 2, 3)
 
 #: Payload field order for schema version 1 (DESIGN 2.3). ``hash`` is not part
 #: of the payload -- it is the digest *of* the payload.
@@ -71,6 +73,11 @@ STOP_CHECK_FIELDS_V1: Tuple[str, ...] = (
 #: ``from_dict``/``to_dict`` round-trips a v1 record without inventing a key
 #: (inventing one would change the bytes and break the chain).
 STOP_CHECK_FIELDS_V2: Tuple[str, ...] = STOP_CHECK_FIELDS_V1 + ("state_hash",)
+
+#: v3 adds one optional top-level field. It is not in ``PAYLOAD_FIELDS_V1``
+#: because it is not *required* by any version -- listing it there would make
+#: every v1 and v2 line unreadable.
+OPTIONAL_PAYLOAD_FIELDS_V3: Tuple[str, ...] = ("task_id",)
 
 #: DESIGN 2.5 state names.
 RUN_STATES = frozenset(
@@ -178,6 +185,11 @@ class TraceRecord:
     latency_ms: int
     prev_hash: str
     parent_run_id: Optional[str] = None
+    #: v3: the task the caller declared for this run (FR-12). Omitted when the
+    #: caller declared nothing, which is why it cannot be a required field.
+    #: Storing it is what lets a reviewer read "this file was the follow-up to
+    #: that one" off the trace instead of trusting a filename.
+    task_id: Optional[str] = None
     chosen: Optional[str] = None
     truncated: bool = False
     evidence_added: List[str] = field(default_factory=list)
@@ -235,6 +247,11 @@ class TraceRecord:
         stop_extra = getattr(self.stop_check, "_extra", None)
         if stop_extra:
             body["stop_check"] = {**stop_extra, **body["stop_check"]}
+        if self.task_id is not None:
+            # Inserted right after ``parent_run_id`` (where the field list puts
+            # it) rather than appended: canonical order is sorted anyway, so this
+            # only affects readability of ``payload()`` for humans.
+            body["task_id"] = self.task_id
         body.update(self._extra)
         return body
 
@@ -276,13 +293,14 @@ class TraceRecord:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "TraceRecord":
         """Rebuild a record, keeping unknown fields so their bytes still hash."""
-        known_payload = set(PAYLOAD_FIELDS_V1) | {"hash"}
+        known_payload = set(PAYLOAD_FIELDS_V1) | {"hash"} | set(OPTIONAL_PAYLOAD_FIELDS_V3)
         extra = {k: v for k, v in data.items() if k not in known_payload}
         record = cls(
             schema_version=int(data.get("schema_version", CURRENT_SCHEMA_VERSION)),
             seq=int(data["seq"]),
             run_id=str(data["run_id"]),
             parent_run_id=data.get("parent_run_id"),
+            task_id=data.get("task_id"),
             session_id=str(data.get("session_id", "")),
             turn=int(data.get("turn", 1)),
             model_id=str(data.get("model_id", "")),

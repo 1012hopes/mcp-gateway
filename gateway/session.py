@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Set
 
 from .limits import Budget, CallSignature
+from .policy import redact
 from .stop.normalize import normalize_args, spec_for
 from .trace.canonical import digest_of
 from .trace.record import StopCheck, TraceRecord
@@ -58,9 +59,21 @@ __all__ = [
     "RunSession",
     "TERMINAL_STATES",
     "digest_of",
+    "digest_result",
     "new_run_id",
     "new_session_id",
 ]
+
+
+def digest_result(payload: Any) -> str:
+    """The digest of a tool result: **redact, then hash** (FR-14).
+
+    Exported and used by both the transport (which must publish this call's
+    digest to R2 before the record exists) and ``record_call`` (which writes it
+    down) so there is exactly one definition. Two call sites computing it
+    separately is how a run ends up halting on a plateau the file does not show.
+    """
+    return digest_of(redact(payload))
 
 #: Above this size a tool result is flagged ``truncated``. The flag matters more
 #: than the truncation itself: evidence extraction (D9) must know that a partial
@@ -111,6 +124,10 @@ class RunSession:
     run_id: str = field(default_factory=new_run_id)
     session_id: str = field(default_factory=new_session_id)
     parent_run_id: Optional[str] = None
+    #: The task the caller declared for this run (FR-12). ``None`` means it never
+    #: said, which is the state every run starts in and the state a single-task
+    #: process stays in forever. It is what a boundary is compared against.
+    task_id: Optional[str] = None
     model_id: str = UNKNOWN_MODEL_ID
     gateway_version: str = GATEWAY_VERSION
     rules_version: str = RULES_VERSION
@@ -199,6 +216,8 @@ class RunSession:
     def stats(self) -> Dict[str, Any]:
         return {
             "run_id": self.run_id,
+            "task_id": self.task_id,
+            "parent_run_id": self.parent_run_id,
             "state": self.state,
             "abort_reason": self.abort_reason,
             "halt_rule": self.halt_rule,
@@ -223,8 +242,15 @@ class RunSession:
         alone -- is what R1 compares. ``count_rows({"table": "x"})`` and
         ``describe_table({"table": "x"})`` share arguments and are not the same
         call.
+
+        Order is ``redact -> normalize -> digest`` (FR-14). Redaction goes first
+        because it has to see the value as sent: normalize trims strings, and a
+        credential with trailing whitespace would slip past a pattern applied
+        afterwards. Nothing else about the order is free either -- swapping
+        normalize and redact would let a folded key (``.lower()``) change which
+        key name the redactor recognizes.
         """
-        return digest_of(normalize_args(args, spec_for(tool)))
+        return digest_of(normalize_args(redact(args), spec_for(tool)))
 
     def proposed_signature(self, tool: str, args: Any) -> CallSignature:
         return CallSignature(tool, self.args_hash_for(tool, args))
@@ -245,8 +271,55 @@ class RunSession:
             added.append(ev_type)
         return added
 
-    # -- R2's information state -------------------------------------------
+    # -- run boundary (FR-12) ---------------------------------------------
 
+    def next_run(
+        self,
+        *,
+        task_id: Optional[str],
+        inherit: bool,
+        required: Optional[set] = None,
+    ) -> "RunSession":
+        """Open the successor run: **a new file**, not a new segment of this one.
+
+        A trace file is a chain, and its genesis hash is derived from the first
+        record's ``run_id`` -- so a second run appended to the same file would be
+        indistinguishable from a continuation of the first, which is exactly the
+        confusion the boundary exists to prevent. The link between the two is
+        ``parent_run_id`` instead: the follow-up's first record points at the run
+        it inherited from, and the parent's evidence is on disk in *its* file.
+
+        That is also why there is no ``inherited_evidence`` field. The claim
+        "this run started knowing X" is derivable -- parent id, then the parent's
+        last record -- and a field would be a second copy of something the chain
+        already proves. Same rule as ``evidence``: record the projection, not a
+        summary that can drift.
+
+        What is reset is what belongs to *this* run's activity: history, result
+        digests, the state trail, the counters, and the turn number. Carrying any
+        of them across a boundary would make the new run look like it had already
+        done things -- the false-halt this module exists to prevent.
+        """
+        run_id = new_run_id()
+        sink = JsonlSink(self.trace_path.parent / f"{run_id}.jsonl", run_id=run_id)
+        return RunSession(
+            sink=sink,
+            run_id=run_id,
+            # One conversation, several runs: the session id survives, so a
+            # reviewer can group the files without guessing from timestamps.
+            session_id=self.session_id,
+            parent_run_id=self.run_id if inherit else None,
+            task_id=task_id,
+            model_id=self.model_id,
+            gateway_version=self.gateway_version,
+            rules_version=self.rules_version,
+            budget=self.budget,
+            required=set(self.required if required is None else required),
+            evidence=dict(self.evidence) if inherit else {},
+            clock=self.clock,
+        )
+
+    # -- R2's information state -------------------------------------------
     def state_hash(
         self, *pending: str, evidence: Optional[Mapping[str, str]] = None
     ) -> str:
@@ -311,10 +384,11 @@ class RunSession:
             model_id=self.model_id,
             gateway_version=self.gateway_version,
             rules_version=self.rules_version,
+            task_id=self.task_id,
             offered=list(offered),
             chosen=chosen,
             args_hash=args_hash,
-            result_digest=digest_of(result),
+            result_digest=digest_result(result),
             truncated=truncated,
             evidence_added=list(evidence_added or []),
             stop_check=stop_check or StopCheck(),

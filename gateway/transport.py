@@ -37,15 +37,17 @@ import time
 from contextlib import AsyncExitStack
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
+import anyio
 from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
+from .boundary import Declaration, DeclarationError, parse_declaration
 from .config import GatewayConfig
 from .evidence import EvidenceModel
 from .limits import CallSignature
 from .registry import Registry, ToolEntry, build_registry
-from .session import MAX_RESULT_BYTES, RunSession, digest_of
+from .session import MAX_RESULT_BYTES, RunSession, digest_result
 from .stop import POST, PRE, StopContext, StopController, StopVerdict, merge_checks
 from .trace.sink import TraceChainError, TraceWriteError
 from .upstream import StdioUpstream, UpstreamFailure, tail_of_exception
@@ -109,10 +111,26 @@ class Gateway:
         # not from a constant: a trace claiming rules-v0(none) while two rules
         # were running is worse than no stamp at all.
         self.session.rules_version = self.controller.version
+        #: What a new run requires when the declaration does not restate it. The
+        #: *launch-time* set, not the previous run's: a requirement is a property
+        #: of the task the process was started for, and carrying the last run's
+        #: requirement across a boundary would hand a new topic the old topic's
+        #: completion criterion -- the false completion this boundary exists to
+        #: prevent. ``inherit`` carries facts, never requirements.
+        self._default_required = frozenset(session.required)
         self._clock = clock
         self._baseline = baseline
         self._registry: Optional[Registry] = None
         self._by_upstream: Dict[str, StdioUpstream] = {}
+        #: One call at a time (FR-16). Not for throughput -- there is one agent
+        #: and one upstream round-trip per call -- but for **atomicity**: the
+        #: handler mutates the session (evidence, history, counters) across two
+        #: ``await`` points, so two concurrent calls could interleave between
+        #: "decided" and "recorded" and produce a trace whose ``seq`` order does
+        #: not match the order anything actually happened in. An agent that
+        #: emits three tool calls in one turn is normal; the queue is invisible
+        #: to it, and the trace stays linear.
+        self._call_lock = anyio.Lock()
         #: What this run already handed back, for R1's replay. Keyed by call
         #: identity, bounded, and never persisted: the trace records digests,
         #: not payloads, so this is the only place a payload can be replayed
@@ -203,6 +221,78 @@ class Gateway:
             unreachable=frozenset(self.evidence_model.unavailable(session.required, offered)),
         )
 
+    # -- run boundary (FR-12) ---------------------------------------------
+
+    def _apply_boundary(self, params: Any) -> Optional[str]:
+        """Start a new run if this request declares a different task.
+
+        Returns a refusal reason instead of raising: a declaration the gateway
+        cannot honour must not take the run down, and it must not be silently
+        ignored either -- the call is recorded as refused, with the reason in the
+        payload, so a reviewer sees the typo in the trace rather than inferring
+        it from a halt with no visible cause.
+        """
+        try:
+            declaration = parse_declaration(params)
+            if not declaration.declared:
+                return None
+            current = self.session
+            if current.task_id is None and current.records_written == 0:
+                # **Adopt, do not fork.** A first call that declares a task and a
+                # first call that does not describe the same situation: nothing
+                # has happened yet. Forking here would leave an empty trace file
+                # that claims a run happened and has no records in it -- a file
+                # ``verify`` can only report as empty.
+                current.task_id = declaration.task
+                current.required = set(self._resolve_required(declaration))
+                return None
+            if not declaration.is_boundary(current.task_id):
+                return None
+            self.begin_run(declaration)
+        except DeclarationError as exc:
+            return str(exc)
+        except OSError as exc:
+            return f"cannot open a trace file for the new run: {exc}"
+        return None
+
+    def _resolve_required(self, declaration: Declaration) -> tuple:
+        """The evidence set the next run will require, validated against the model."""
+        if declaration.require is None:
+            required = tuple(sorted(self._default_required))
+        else:
+            required = declaration.require
+        unknown = sorted(set(required) - set(self.evidence_model.types))
+        if unknown:
+            raise DeclarationError(
+                f"unknown evidence type(s): {', '.join(unknown)}; declared: "
+                f"{', '.join(self.evidence_model.types) or '(none)'}"
+            )
+        return required
+
+    def begin_run(self, declaration: Declaration) -> RunSession:
+        """Close this run and open its successor. Trace continuity is per file."""
+        current = self.session
+        required = self._resolve_required(declaration)
+
+        # The new sink is opened *first*: if the trace for the next run cannot be
+        # written, the boundary must not happen at all, and the current run keeps
+        # serving -- same fail-closed order as the result write.
+        new = current.next_run(
+            task_id=declaration.task, inherit=declaration.inherit, required=required
+        )
+        new.rules_version = self.controller.version
+        current.sink.close()
+        self.session = new
+        # R1's replay cache is per run. A cross-run replay would hand the new
+        # topic an answer from the old one and call it a duplicate.
+        self._delivered.clear()
+        print(
+            f"run boundary: {current.run_id} -> {new.run_id} | {declaration.describe()}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return new
+
     def _refuse(self, session: RunSession) -> types.CallToolResult:
         reason = session.abort_reason if session.aborted else session.halt_reason
         label = "run aborted" if session.aborted else f"run {session.state.lower()}"
@@ -216,6 +306,16 @@ class Gateway:
     async def handle_call_tool(
         self, ctx: Any, params: types.CallToolRequestParams
     ) -> types.CallToolResult:
+        """The choke point. Serialized: one call is judged and recorded at a time."""
+        async with self._call_lock:
+            return await self._handle_call(params)
+
+    async def _handle_call(self, params: types.CallToolRequestParams) -> types.CallToolResult:
+        # -- step 0: the run boundary -------------------------------------
+        # Before the closed check, not after: a follow-up question arriving at a
+        # run that already halted must be served by the *new* run, otherwise the
+        # boundary feature would only ever work for runs that did not need it.
+        boundary_error = self._apply_boundary(params)
         session = self.session
         session.calls_attempted += 1
 
@@ -291,7 +391,7 @@ class Gateway:
                 payload = {"blocked": verdict.reason}
         else:
             response, payload, forwarded_decision = await self._forward(
-                entry, chosen, offered, args
+                entry, chosen, offered, args, blocked=boundary_error
             )
             decision = forwarded_decision
 
@@ -312,7 +412,7 @@ class Gateway:
             # judge *this* result and the record that will hold it must agree:
             # a provisional hash that the trace then contradicts would make the
             # plateau unreadable exactly where it matters.
-            committed = digest_of(payload)
+            committed = digest_result(payload)
             state_hash = session.state_hash(committed, evidence=pending_evidence)
             post = self.controller.evaluate(
                 POST,
@@ -408,9 +508,19 @@ class Gateway:
         chosen: str,
         offered: Sequence[str],
         args: Mapping[str, Any],
+        *,
+        blocked: Optional[str] = None,
     ) -> tuple[types.CallToolResult, Dict[str, Any], str]:
-        """Steps 4-5: the only place an upstream is actually called."""
+        """Steps 4-5: the only place an upstream is actually called.
+
+        ``blocked`` carries a refusal decided before this method: an unusable
+        run-boundary declaration. It is funnelled through here rather than
+        handled at the call site so that *every* refusal takes one path -- it is
+        recorded like any other call, and the decision name says why.
+        """
         try:
+            if blocked is not None:
+                raise _Blocked("block_declaration", blocked)
             if entry is None:
                 raise _Blocked(
                     "block_unknown_tool",

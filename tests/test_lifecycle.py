@@ -262,6 +262,104 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue(verify_path(self.trace_path).ok)
 
 
+class _SlowUpstream(FakeUpstream):
+    """Sleeps inside ``call_tool`` so concurrent handlers really do interleave.
+
+    Without an await point in the middle, ``gather`` of three calls would still
+    run them one after another by accident, and a test of serialization would
+    pass against code that has none.
+    """
+
+    async def call_tool(self, original_name: str, arguments):
+        await asyncio.sleep(0.01)
+        return await super().call_tool(original_name, arguments)
+
+
+@unittest.skipUnless(HAS_MCP, "mcp SDK not installed (run inside .venv)")
+class SerializationTests(unittest.TestCase):
+    """FR-16: an agent may emit three calls in one turn; the trace stays linear."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.trace_path = Path(self._tmp.name) / "run-parallel.jsonl"
+
+    def test_three_concurrent_calls_are_recorded_one_at_a_time(self):
+        async def scenario():
+            upstream = _SlowUpstream()
+            sink = JsonlSink(self.trace_path, run_id="run-parallel")
+            session = RunSession(
+                sink=sink, run_id="run-parallel", budget=Budget(max_calls=10)
+            )
+            from gateway.stop import StopController
+
+            gateway = Gateway(
+                GatewayConfig(), [upstream], session, controller=StopController(())
+            )
+            params = [
+                types.CallToolRequestParams(name="sqlite.query", arguments={"sql": f"q{i}"})
+                for i in range(3)
+            ]
+            results = await asyncio.gather(
+                *(gateway.handle_call_tool(None, p) for p in params)
+            )
+            sink.close()
+            return session, upstream, results
+
+        session, upstream, results = asyncio.run(scenario())
+
+        records = [
+            json.loads(line)
+            for line in self.trace_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(len(results), 3)
+        self.assertEqual(len(records), 3)
+        self.assertEqual([r["seq"] for r in records], [1, 2, 3], "linear, no interleaving")
+        # ``turn`` is read-then-incremented by whichever handler holds the lock.
+        # Without one, two handlers read the same value and the trace claims two
+        # calls happened in the same turn.
+        self.assertEqual([r["turn"] for r in records], [1, 2, 3])
+        self.assertEqual(len(upstream.calls), 3, "each call reached the upstream once")
+        self.assertEqual(verify_path(self.trace_path).ok, True)
+        self.assertEqual(session.results_delivered, session.records_written)
+
+    def test_a_call_that_arrives_while_the_run_halts_is_still_refused(self):
+        # Serialization must not turn into "queue everything and decide later":
+        # the second call sees the halt the first one produced.
+        async def scenario():
+            upstream = _SlowUpstream()
+            sink = JsonlSink(self.trace_path, run_id="run-parallel")
+            session = RunSession(
+                sink=sink, run_id="run-parallel", budget=Budget(max_calls=10)
+            )
+            from gateway.stop import StopController
+
+            gateway = Gateway(
+                GatewayConfig(),
+                [upstream],
+                session,
+                controller=StopController(
+                    [Rule("R4", 30, POST, when=lambda ctx: True)]
+                ),
+            )
+            first = types.CallToolRequestParams(name="sqlite.query", arguments={"sql": "a"})
+            second = types.CallToolRequestParams(name="sqlite.query", arguments={"sql": "b"})
+            out = await asyncio.gather(
+                gateway.handle_call_tool(None, first),
+                gateway.handle_call_tool(None, second),
+            )
+            sink.close()
+            return session, out
+
+        session, out = asyncio.run(scenario())
+        self.assertEqual(session.state, "HALTED_COMPLETE")
+        # The refusal is the whole result, not an appended notice: there is no
+        # upstream data to append it to.
+        self.assertTrue(out[1].is_error)
+        self.assertIn("no further calls are accepted", out[1].content[0].text)
+
+
 class _noop:
     """Stands in for ``async with upstream``: the fake never connects."""
 

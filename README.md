@@ -7,7 +7,7 @@
 
 一句话概括差异化：**别的网关管"谁能调"，这个管"什么时候该停"，并且能证明那次停是对的。**
 
-> 状态：**D9 / D18**（轨迹层 + 多上游 + 生命周期 + 参数归一化 + 证据模型 + R1/R2/R3/R4/R6 已跑通；R5 危险动作、run 边界、任务集、指标表待做）。进度见 [`PLAN.md`](PLAN.md) 与 [`docs/progress.md`](docs/progress.md)。
+> 状态：**D10 / D18**（轨迹层 + 多上游 + 生命周期 + 参数归一化 + 证据模型 + R1/R2/R3/R4/R6 + run 边界与脱敏已跑通，384 tests；R5 危险动作、任务集、指标表待做）。进度见 [`PLAN.md`](PLAN.md) 与 [`docs/progress.md`](docs/progress.md)。
 
 ## 它解决什么问题
 
@@ -45,7 +45,8 @@ recursion_limit = 25  # LangGraph
 | D7 | 参数归一化 + R1 重复调用 + R3 预算（**同任务 9 步 → 5 步**） | ✅ 241 tests |
 | D8 | R2 无进展 + 规则集 R1/R2/R3 + **G2 演示**（**打转任务 11 步 → 3 步**） | ✅ 271 tests |
 | D9 | 证据模型（来源 + 参数谓词 + 结果形状）+ R4 证据完备 + DEGRADED（**正常任务 9 步 → 4 步**） | ✅ 331 tests |
-| D10–D12 | run 边界 + 20 条任务 + checker + **G3 指标表** | 待做 |
+| D10 | run 边界声明 + 先脱敏再哈希 + `tool_calls` 串行化（**同一串调用：声明了就继续，不声明就误停**） | ✅ 384 tests |
+| D11–D12 | 20 条任务 + checker + **G3 指标表** | 待做 |
 
 ## 快速开始
 
@@ -67,6 +68,9 @@ uv run python scripts/evidence_demo.py
 
 # G2 演示：一条必然打转的任务，11 步压到 3 步，平台期在轨迹里可见
 uv run python scripts/g2_demo.py
+
+# D10：同一串调用，声明了 run 边界就继续，不声明就误停（两个进程对照）
+uv run python scripts/boundary_demo.py
 
 # G1 演示：正常运行 / 真实拔掉写权限 / 注入写盘失败
 uv run python scripts/failclosed_demo.py
@@ -92,10 +96,11 @@ python -m gateway.trace verify traces/samples/demo-12-steps.jsonl
 
 **为什么轨迹层零依赖**：它是整个项目的证据底座，不该因为某个包升级而写不出记录。`upstream.py` / `transport.py` 才依赖官方 MCP SDK（`mcp>=2.3`）。
 
-## 一次 run 的七个步骤
+## 一次 run 的八个步骤
 
 | # | 做什么 | 在哪 | 出错时 |
 |---|---|---|---|
+| 0 | **run 边界**：`_meta.gateway.task` 变了就收束本 run、开新 run | `gateway/boundary.py` | 声明写错 → 该调用被拒但留痕，run 继续 |
 | 1 | 收到 `tools/call` | `transport.handle_call_tool` | — |
 | 2 | **前置守卫**：危险动作 / 重复调用 / 证据不可得 | `stop` 的 `pre` 阶段 | 不触达上游，仍写一条记录（R1 回填上次结果，R6 直接 DEGRADED） |
 | 3 | 转发上游（超时 + 失败归一） | `_forward` | 变成 error 结果，不中断 |
@@ -104,7 +109,11 @@ python -m gateway.trace verify traces/samples/demo-12-steps.jsonl
 | 6 | 写记录（含 `offered/chosen/prev_hash`） | `session.record_call` | 结果丢弃、run 置 `ABORTED` |
 | 7 | 交付结果（+ 停止通知） | 同上，之后 | 后续调用一律拒绝 |
 
+第 0 步放在最前、且在"已关闭"检查**之前**：一个已经 HALTED 的 run 必须能被新话题接管，否则边界功能只在不需要它的时候可用。
+
 **为什么分两段而不是一段**：R5/R1/R6 的判定在转发之前就已成立，价值在于"让这次调用不发生"；R4/R2/R3 要看到新证据才能判，只能在之后。`priority` 仍是全局有序（10/20 < 30/35/40/50），`attempted` 是两段按执行顺序拼接的日志——"为什么不是别的规则停的"要靠它回答。
+
+**并发**：`handle_call_tool` 全程持一把锁，一次只判一个调用。不是为了吞吐，而是因为处理过程跨两个 `await` 点修改会话（证据 / 历史 / 计数）——两个并发调用能在"已决定"和"已记录"之间交错，产出一条 `seq` 与实际发生顺序不符的轨迹。agent 一轮发三个调用是常态，队列对它不可见，轨迹保持线性。
 
 **停止怎么传达给 Agent**：结果里追加一个 `[gateway] halt | state=… | rule=… | reason=…` 文本块（`gateway/wire.py`，全项目唯一被两侧共享的模块）。这是**礼貌**；真正的约束是**后续调用一律拒绝**。只靠通知的停止是 prompt，不是控制。
 
@@ -204,6 +213,43 @@ degraded -- the tool that produces sql.rows.repos is not available
 
 `DEGRADED` 是终态而不是"降级后继续"：生产者是声明过的、可用工具集第一步就确定，继续跑只能为一个已成立的结论付钱。分类本身就是产出——指标表因此能把这条 run 从"停晚了"里剔除，而不是给它记一个 24 步的假超时。
 
+## run 边界：为什么它必须是声明的
+
+一个对话先问"未解决的事故"，再问别的事。如果第二个问题还在同一个 run 里：
+
+- 上一个话题的事实还在证据集里，**完备性可能在还没读任何东西之前就成立**（假完成）；
+- 新话题的第一句回答恰好重复了旧话题的最后一句，信息指纹不动，**R2 会把健康的 run 停在第一步**（假无进展）。
+
+两种结局在轨迹里长得一样，成因却完全无关，而且都**没法靠更好的启发式解决**——"话题变了"是关于**调用方意图**的事实，网关只看得到工具调用。所以它被声明：
+
+```jsonc
+// tools/call 的 _meta
+{ "gateway": { "task": "t01-followup", "inherit": true, "require": ["sql.schema"] } }
+```
+
+- 只有 `task` **变化**才是边界。相同任务重复声明是 no-op——无状态客户端会把同一个声明挂在每一次请求上。
+- `inherit` 只携带**事实**，不携带**要求**：`require` 缺省取进程启动时的集合。把上一 run 的要求带进新任务，等于把旧任务的完成判据交给新任务，正好是上面那个假完成。
+- 边界之后**一个 run = 一个轨迹文件**。不给同一文件追加第二个 run：链的创世哈希由首条记录的 `run_id` 决定，追加进去在文件里与"上一个 run 的继续"无法区分。两者的关系由 `parent_run_id` 和记录里的 `task_id` 承担，于是"这个文件属于哪个任务、继承了谁"是可读的，不是猜的。
+
+同一串调用，两个进程对照（`scripts/boundary_demo.py`）：
+
+```
+no declaration -- one process, two topics, same first call
+  1. [ok  ] sqlite.list_tables   topic 1 opens by reading the schema
+  2. [halt] sqlite.list_tables   topic 2 opens the same way
+  halt: task=(undeclared) | rule=R1 state=HALTED_DUPLICATE
+
+declared -- one process, three runs, one trace file each
+  1. [ok  ] sqlite.list_tables   topic 1 opens            [task=t01]
+  2. [halt] sqlite.list_tables   follow-up: already knows [task=t01-followup inherit require=['sql.schema']]
+  3. [ok  ] sqlite.list_tables   new topic: relearn it    [task=t02]
+  halt: task=t01-followup | rule=R4 state=HALTED_COMPLETE
+```
+
+第 2 步的 `evidence_added` 是 `[]`——它一步没查就完成了，因为事实是继承来的；第 3 步的 `evidence_added` 又是 `["sql.schema"]`，因为新话题没有继承任何东西。两件事都从轨迹上读出来，不是从脚本的意图里读出来。
+
+**先脱敏再哈希**（同一层）：身份流水线是 `redact → normalize → digest`。判据只有一句——同一调用换 token 得到相同 hash。做少了 token 进摘要，凭据一换同一个问题就换一个身份，R1 永不命中；做多了（"长随机串都抹"）订单号、commit SHA 一起被抹，两个不同调用并成一个身份，健康 run 被误停。现有任务没有一个传凭据，所以脱敏对既有轨迹是 no-op，这条被单测钉住。
+
 ## 工具面：归一化不是格式化，是"让工具可被调用"
 
 对着两个上游、10 个工具跑，其中一个专门不合规（`mcp_servers/dirty_schema_server.py`）：
@@ -247,7 +293,9 @@ gateway/
   __main__.py        唯一装配点：先开 sink，再连上游，最后装规则（开不了就退出）
   config.py          配置解析（{python} / {root} 替换）
   limits.py          Budget + CallSignature（纯值类型，叶子模块，避免依赖成环）
-  session.py         RunSession：证据集 / 预算 / 调用历史 + 唯一写轨迹入口
+  session.py         RunSession：证据集 / 预算 / 调用历史 + 唯一写轨迹入口 + `next_run`
+  boundary.py        run 边界声明（`_meta.gateway`）：解析、校验、**不推断**
+  policy.py          脱敏：凭据键 + 凭据形态 -> 固定标记（在归一化之前）
   stop/controller.py 停止控制器：排序、短路、attempted 日志（**不含任何判据**）
   stop/normalize.py  参数归一化：调用身份的唯一定义处（A2.1）
   evidence.py        证据模型：来源 + 参数谓词 + 结果形状 -> ev_type（纯函数）
@@ -258,7 +306,7 @@ gateway/
   rules/budget.py    R3 预算耗尽（post，最后一道保险）
   wire.py            停止通知的线格式——网关与 agent 唯一共享的模块
   registry.py        工具面：schema 归一、命名空间、schema_hash、漂移冻结
-  transport.py       MCP server 侧：七步生命周期，记录成功后才交付结果
+  transport.py       MCP server 侧：八步生命周期，记录成功后才交付结果，一次一个调用
   upstream.py        MCP client：stdio 连接，只负责通信，不做归一
   trace/canonical.py 确定性序列化（键序、浮点、UTF-8、拒绝 NaN）
   trace/record.py    TraceRecord + StopCheck + 哈希链入口
@@ -277,6 +325,7 @@ scripts/echo_client.py              端到端驱动（固定调用表，D4 产�
 scripts/agent_demo.py               基线 vs 受控，同一任务两遍 + 10 项自检
 scripts/g2_demo.py                  G2：打转任务 11 步 -> 3 步 + 8 项自检
 scripts/evidence_demo.py            D9：R4 收束 + 答案检查 + DEGRADED + 12 项自检
+scripts/boundary_demo.py            D10：同一串调用，声明了就继续、不声明就误停 + 12 项自检
 scripts/failclosed_demo.py          G1 的 S1/S2/S3
 scripts/tamper_demo.py              8 个篡改用例
 scripts/freeze_schema.py            冻结 / `--check` 检查 schema 漂移
@@ -311,6 +360,9 @@ docs/demo-g2.md                     G2 台词与录屏脚本
 - **schema 漂移时工具直接消失**：从 `offered` 移除、调用返回 `block_schema_drift`，而不是降级继续。这是刻意的（历史轨迹可比性优先），但现场看起来像"网关坏了"，所以 `registry: schema-drift:...` 会打到 stderr
 - **R1 的回填假设上游在一轮 run 内是参数的函数**：回填的是上次结果，上游若可变，回填的可能是过期数据。当前上游只读（`mode=ro`），假设成立；换可写上游时必须退化为"拦截并说明"，并把退化写进 `decision`
 - **R2 判"无进展"靠逐字节重复的答案**：上游若在每次响应里塞时间戳、请求 id 或随机排序，语义相同的两次查询也会得到不同摘要，R2 就再也判不出停滞。它因此是被动兜底——真正承担"该收了"的是 R4，它不依赖答案是否重复。别把 R2 的低命中率读成"任务都很健康"
+- **run 边界靠调用方声明，不靠推断**：网关没有"用户说了新问题"这个信号，只有工具调用，所以边界来自 `_meta.gateway.task`。一个**不声明**的客户端永远不分叉，会退化成"所有话题共用一个 run"——那正是误停的来源。代价是接入方必须配合：这个项目的形态是"网关 + 它认识的客户端"，不是"任何 MCP 客户端插上就有用"
+- **脱敏只认声明过的键名与已知凭据形态**：`{"credential": ...}` 会被隐藏，`{"blob": "..."}` 不会，除非它长得像 `ghp_` / `sk-` / `AKIA` / `Bearer`。取向是"宁可漏掉一个秘密，不可并掉两个调用"——反过来做，误停会先于泄露发生
+- **串行化是进程内的一把锁**：它保证本进程的轨迹线性、证据集不竞态，但不解决多进程同时写同一 `trace_dir` 的问题（各自成链、互不干扰，但没有跨 run 的偏序）
 - 参数在 20 条任务上标定，样本量不做显著性检验，只报配对差值
 
 ## License

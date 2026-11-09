@@ -76,6 +76,9 @@ _STR_FIELDS = (
 _INT_FIELDS = ("schema_version", "seq", "turn", "latency_ms")
 _LIST_FIELDS = ("offered", "evidence_added")
 _NULLABLE_STR_FIELDS = ("parent_run_id", "chosen")
+#: v3 optional fields: validated only when present. A reader that required them
+#: would reject every v1/v2 line -- the opposite of why versions exist.
+_OPTIONAL_STR_FIELDS = ("task_id",)
 _BOOL_FIELDS = ("truncated",)
 
 _REQUIRED_BY_VERSION: Dict[int, Tuple[str, ...]] = {
@@ -84,6 +87,8 @@ _REQUIRED_BY_VERSION: Dict[int, Tuple[str, ...]] = {
     # reader that demanded it would reject every v1 line it was written to keep
     # verifying.
     2: PAYLOAD_FIELDS_V1 + ("hash",),
+    # v3 likewise adds only an optional field (``task_id``).
+    3: PAYLOAD_FIELDS_V1 + ("hash",),
 }
 
 _STOP_CHECK_REQUIRED = ("rule", "hit", "evidence", "missing", "attempted")
@@ -186,6 +191,9 @@ def _check_structure(
     for name in _BOOL_FIELDS:
         if not isinstance(data[name], bool):
             return REASON_TYPE_ERROR, f"{name} 应为 bool"
+    for name in _OPTIONAL_STR_FIELDS:
+        if name in data and data[name] is not None and not isinstance(data[name], str):
+            return REASON_TYPE_ERROR, f"{name} 应为 str（缺省表示未声明）"
 
     stop_check = data["stop_check"]
     if not isinstance(stop_check, dict):

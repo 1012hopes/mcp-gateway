@@ -42,13 +42,20 @@ class RunSessionTests(unittest.TestCase):
         self.assertEqual(verify_path(self.path).records, 2)
 
     def test_args_are_hashed_not_stored(self):
+        # This case used to assert ``digest_of(secret)`` -- i.e. that the token
+        # was *part of* the identity, which is precisely what FR-14 forbids
+        # (D10). The example is unchanged on purpose: it is the one that used to
+        # prove the wrong thing.
         secret = {"token": "s3cret-value"}
         record = self.session.record_call(
             offered=["a"], chosen="a", args=secret, result="ok", latency_ms=1
         )
         raw = self.path.read_text(encoding="utf-8")
         self.assertNotIn("s3cret-value", raw)
-        self.assertEqual(record.args_hash, digest_of(secret))
+        self.assertEqual(record.args_hash, self.session.args_hash_for("a", secret))
+        self.assertNotEqual(
+            record.args_hash, digest_of(secret), "the credential must not be hashed"
+        )
 
     def test_counters_separate_delivery_from_recording(self):
         self.session.record_call(offered=["a"], chosen="a", args={}, result=1, latency_ms=1)

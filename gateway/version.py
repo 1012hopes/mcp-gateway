@@ -9,12 +9,13 @@ field is merely added -- adding a field is covered by ``schema_version``.
 
 from __future__ import annotations
 
-GATEWAY_VERSION = "0.8.0"
+GATEWAY_VERSION = "0.9.0"
 
 #: ``rules-v0`` means: the *versioning scheme*, not "no rules". The actual set is
-#: appended by ``StopController.version`` (``rules-v0(R1,R4,R6,R2,R3)`` at D9). A
-#: trace stamped with one set cannot be compared with a run under another --
-#: which is exactly why the stamp exists.
+#: appended by ``StopController.version`` (``rules-v0(R1,R4,R6,R2,R3)`` at D9/D10).
+#: A trace stamped with one set cannot be compared with a run under another --
+#: which is exactly why the stamp exists. D10 changed no rule: the boundary is
+#: not a criterion, it decides *which run is being judged*, so the stamp stays.
 #:
 #: This constant is only the default on a session that no controller has been
 #: attached to yet; ``Gateway.__init__`` overwrites it from the controller. It is

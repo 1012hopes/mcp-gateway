@@ -2,6 +2,8 @@
   "id": "t01",
   "goal": "List every unresolved incident with its repo and severity, then the star count of each affected repo.",
   "required_evidence": ["sql.schema", "sql.rows.incidents", "sql.rows.repos"],
+  "optimal_steps": 3,
+  "optimal_path": "sqlite.list_tables -> sqlite.query (unresolved incidents) -> sqlite.query (their repos' stars)",
   "max_turns": 10,
   "policy": "reactive_sqlite"
 }

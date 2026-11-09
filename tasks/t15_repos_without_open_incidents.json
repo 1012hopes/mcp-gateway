@@ -1,0 +1,27 @@
+{
+  "id": "t15",
+  "goal": "Which repos have no open incident?",
+  "required_evidence": ["sql.schema", "sql.rows.incidents", "sql.rows.repos"],
+  "optimal_steps": 3,
+  "optimal_path": "sqlite.list_tables -> sqlite.query (open incidents) -> sqlite.query (repos)",
+  "plan": [
+    { "tool": "sqlite.list_tables", "args": {} },
+    { "tool": "sqlite.describe_table", "args": { "table": "incidents" } },
+    {
+      "tool": "sqlite.query",
+      "args": {
+        "sql": "select repo from incidents where resolved_at is null order by repo",
+        "limit": 50
+      }
+    },
+    {
+      "tool": "sqlite.query",
+      "args": {
+        "sql": "select name from repos order by name",
+        "limit": 50
+      }
+    }
+  ],
+  "max_turns": 12,
+  "policy": "declared"
+}

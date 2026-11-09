@@ -1,0 +1,20 @@
+{
+  "id": "t05",
+  "goal": "List every dependency flagged vulnerable, with its repo, package and version.",
+  "required_evidence": ["sql.schema", "sql.rows.deps"],
+  "optimal_steps": 2,
+  "optimal_path": "sqlite.list_tables -> sqlite.query (deps where vulnerable = 1)",
+  "plan": [
+    { "tool": "sqlite.list_tables", "args": {} },
+    { "tool": "sqlite.describe_table", "args": { "table": "deps" } },
+    {
+      "tool": "sqlite.query",
+      "args": {
+        "sql": "select repo, package, version from deps where vulnerable = 1 order by repo, package",
+        "limit": 50
+      }
+    }
+  ],
+  "max_turns": 12,
+  "policy": "declared"
+}

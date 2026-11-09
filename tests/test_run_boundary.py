@@ -65,6 +65,20 @@ def _records(path: Path) -> list:
     ]
 
 
+def _build_rule(name: str):
+    """Instantiate a rule by name, deferring the import to call time.
+
+    Naming the classes in a class body would evaluate them at *import* time,
+    before ``skipUnless`` can skip anything -- and they live behind the SDK
+    import, so a bare interpreter would report a ``NameError`` that says nothing
+    about the missing dependency. Same trap D9 fixed in ``test_agent_e2e.py``;
+    this file had it too, and only the bare-interpreter run shows it.
+    """
+    from gateway import rules as rules_module
+
+    return getattr(rules_module, name)()
+
+
 class DeclarationParsingTests(unittest.TestCase):
     """No SDK needed: this is a parser over a dict."""
 
@@ -239,7 +253,8 @@ class ForkTests(unittest.TestCase):
 class _GatewayMixin:
     """One gateway, one fake upstream, calls driven in-process."""
 
-    rules: tuple = (DuplicateCall(),)
+    #: Rule names, not instances: see ``_build_rule``.
+    rule_names: tuple = ("DuplicateCall",)
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -257,7 +272,7 @@ class _GatewayMixin:
             GatewayConfig(),
             [self.upstream],
             self.session,
-            controller=StopController(self.rules),
+            controller=StopController(tuple(_build_rule(n) for n in self.rule_names)),
             evidence=self.evidence,
         )
 
@@ -340,7 +355,7 @@ class WithoutBoundaryTests(_GatewayMixin, unittest.TestCase):
 
 @unittest.skipUnless(HAS_MCP, "mcp SDK not installed (run inside .venv)")
 class WithBoundaryTests(_GatewayMixin, unittest.TestCase):
-    rules = (DuplicateCall(), EvidenceComplete())
+    rule_names = ("DuplicateCall", "EvidenceComplete")
 
     def test_a_declared_task_change_starts_a_new_run(self):
         results = self.calls(

@@ -1,0 +1,22 @@
+{
+  "id": "t20",
+  "goal": "Page through the commits of repo 'ghost/typo' and report how many there are. The repo may not exist; if it does not, say so.",
+  "required_evidence": [],
+  "optimal_steps": 1,
+  "optimal_path": "sqlite.query once: the empty row set is the answer",
+  "max_turns": 10,
+  "policy": "futile_search",
+  "futile_sql": [
+    "select sha from commits where repo = 'ghost/typo' order by id limit 20 offset 0",
+    "select sha from commits where repo = 'ghost/typo' order by id limit 20 offset 20",
+    "select sha from commits where repo = 'ghost/typo' order by id limit 20 offset 40",
+    "select sha from commits where repo = 'ghost/typo' order by id limit 20 offset 60",
+    "select sha from commits where lower(repo) = 'ghost/typo' order by id limit 20",
+    "select sha from commits where repo like 'ghost%' order by id limit 20",
+    "select sha from commits where repo glob 'ghost/*' order by id limit 20",
+    "select sha from commits where instr(repo, 'typo') > 0 order by id limit 20",
+    "select sha from commits where trim(repo) = 'ghost/typo' order by id limit 20",
+    "select sha from commits where substr(repo, 1, 5) = 'ghost' order by id limit 20",
+    "select sha from commits where repo like '%/typo' order by id limit 20"
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "id": "t04",
+  "goal": "How many commits touch 1012hopes/mcp-gateway, and who authored them?",
+  "required_evidence": ["sql.schema", "sql.rows.commits"],
+  "optimal_steps": 2,
+  "optimal_path": "sqlite.list_tables -> sqlite.query (commits where repo = gateway)",
+  "plan": [
+    { "tool": "sqlite.list_tables", "args": {} },
+    { "tool": "sqlite.describe_table", "args": { "table": "commits" } },
+    {
+      "tool": "sqlite.query",
+      "args": {
+        "sql": "select sha, author, committed_at from commits where repo = '1012hopes/mcp-gateway' order by committed_at",
+        "limit": 50
+      }
+    }
+  ],
+  "max_turns": 12,
+  "policy": "declared"
+}

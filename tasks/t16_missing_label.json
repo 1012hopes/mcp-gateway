@@ -1,0 +1,22 @@
+{
+  "id": "t16",
+  "goal": "Which incidents carry the label 'needs-triage'? If none do, say so.",
+  "required_evidence": [],
+  "optimal_steps": 1,
+  "optimal_path": "sqlite.query once: the empty row set is the answer",
+  "max_turns": 10,
+  "policy": "futile_search",
+  "futile_sql": [
+    "select incident_id from labels where label = 'needs-triage'",
+    "select incident_id from labels where lower(label) = lower('needs-triage')",
+    "select incident_id from labels where label like '%needs-triage%'",
+    "select incident_id from labels where label glob '*triage*'",
+    "select incident_id from labels where instr(label, 'triage') > 0",
+    "select incident_id from labels where trim(label) = 'needs-triage'",
+    "select incident_id from labels where label like 'needs%'",
+    "select incident_id from labels where upper(label) = upper('needs-triage')",
+    "select incident_id from labels where label like '%triage'",
+    "select incident_id from labels where substr(label, 1, 5) = 'needs'",
+    "select incident_id from labels where label != 'needs-triage' and label = 'needs-triage'"
+  ]
+}

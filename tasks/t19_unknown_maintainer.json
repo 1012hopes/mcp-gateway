@@ -1,0 +1,22 @@
+{
+  "id": "t19",
+  "goal": "Which repos does maintainer 'nobody' look after? If that handle is unknown, say so.",
+  "required_evidence": [],
+  "optimal_steps": 1,
+  "optimal_path": "sqlite.query once: the empty row set is the answer",
+  "max_turns": 10,
+  "policy": "futile_search",
+  "futile_sql": [
+    "select repo from maintainers where handle = 'nobody'",
+    "select repo from maintainers where lower(handle) = 'nobody'",
+    "select repo from maintainers where handle like '%nobody%'",
+    "select repo from maintainers where handle glob 'nob*'",
+    "select repo from maintainers where instr(handle, 'nobody') > 0",
+    "select repo from maintainers where trim(handle) = 'nobody'",
+    "select repo from maintainers where handle like 'no%'",
+    "select repo from maintainers where upper(handle) = upper('nobody')",
+    "select repo from maintainers where handle like '%body'",
+    "select repo from maintainers where substr(handle, 1, 3) = 'nob'",
+    "select repo from maintainers where handle != 'nobody' and handle = 'nobody'"
+  ]
+}

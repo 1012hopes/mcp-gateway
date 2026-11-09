@@ -24,6 +24,7 @@ if TYPE_CHECKING:  # pragma: no cover - for editors and type checkers only
     from .policy import (
         Action,
         AgentContext,
+        DeclaredPolicy,
         Observation,
         Policy,
         ReactivePolicy,
@@ -33,6 +34,7 @@ if TYPE_CHECKING:  # pragma: no cover - for editors and type checkers only
 __all__ = [
     "Action",
     "AgentContext",
+    "DeclaredPolicy",
     "Observation",
     "Policy",
     "ReactivePolicy",
@@ -50,6 +52,7 @@ __all__ = [
 _LAZY = {
     "Action": "policy",
     "AgentContext": "policy",
+    "DeclaredPolicy": "policy",
     "Observation": "policy",
     "Policy": "policy",
     "ReactivePolicy": "policy",

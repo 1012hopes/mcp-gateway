@@ -1,0 +1,20 @@
+{
+  "id": "t03",
+  "goal": "Which releases were breaking changes, and when was each published?",
+  "required_evidence": ["sql.schema", "sql.rows.releases"],
+  "optimal_steps": 2,
+  "optimal_path": "sqlite.list_tables -> sqlite.query (releases where breaking = 1)",
+  "plan": [
+    { "tool": "sqlite.list_tables", "args": {} },
+    { "tool": "sqlite.describe_table", "args": { "table": "releases" } },
+    {
+      "tool": "sqlite.query",
+      "args": {
+        "sql": "select repo, tag, published_at from releases where breaking = 1 order by published_at",
+        "limit": 50
+      }
+    }
+  ],
+  "max_turns": 12,
+  "policy": "declared"
+}

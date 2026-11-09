@@ -1,0 +1,27 @@
+{
+  "id": "t14",
+  "goal": "Does 1012hopes/mcp-gateway have a v0.9.0 release, and how many stars does the repo have?",
+  "required_evidence": ["sql.schema", "sql.rows.releases", "sql.rows.repos"],
+  "optimal_steps": 3,
+  "optimal_path": "sqlite.list_tables -> sqlite.query (releases where tag = v0.9.0) -> sqlite.query (repos)",
+  "plan": [
+    { "tool": "sqlite.list_tables", "args": {} },
+    { "tool": "sqlite.describe_table", "args": { "table": "releases" } },
+    {
+      "tool": "sqlite.query",
+      "args": {
+        "sql": "select repo, tag, published_at, breaking from releases where tag = 'v0.9.0' order by repo",
+        "limit": 50
+      }
+    },
+    {
+      "tool": "sqlite.query",
+      "args": {
+        "sql": "select name, stars from repos where name = '1012hopes/mcp-gateway'",
+        "limit": 50
+      }
+    }
+  ],
+  "max_turns": 12,
+  "policy": "declared"
+}

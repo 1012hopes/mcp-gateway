@@ -1,0 +1,20 @@
+{
+  "id": "t06",
+  "goal": "Who maintains maximhq/bifrost, in what role, and since when?",
+  "required_evidence": ["sql.schema", "sql.rows.maintainers"],
+  "optimal_steps": 2,
+  "optimal_path": "sqlite.list_tables -> sqlite.query (maintainers where repo = bifrost)",
+  "plan": [
+    { "tool": "sqlite.list_tables", "args": {} },
+    { "tool": "sqlite.describe_table", "args": { "table": "maintainers" } },
+    {
+      "tool": "sqlite.query",
+      "args": {
+        "sql": "select handle, role, since from maintainers where repo = 'maximhq/bifrost' order by handle",
+        "limit": 50
+      }
+    }
+  ],
+  "max_turns": 12,
+  "policy": "declared"
+}

@@ -30,6 +30,16 @@ Seven runs, seven claims:
 * ``DegradedRun`` -- t01 against a configuration where the only upstream that can
   produce ``sql.rows.repos`` is absent: one step, ``DEGRADED``, and R6 explains
   which producer is missing instead of letting the run burn its budget.
+
+Three more from D11, which took the task set from two tasks to twenty:
+
+* ``MultiFactBaselineRun`` / ``MultiFactRun`` -- t10 (two facts over two tables)
+  without and with the rules: ten steps become four. The second fact is the point:
+  a shape-only evidence model would call this finished after the first row set.
+* ``PagedSpinBaselineRun`` / ``PagedSpinRun`` -- t20, an agent paging through the
+  commits of a repo that does not exist. Same ending as t02 by a different route
+  (offset pagination instead of rephrasing), which is what makes "the plateau is
+  the signal" a claim about a class of behaviour rather than about one script.
 """
 
 from __future__ import annotations
@@ -428,6 +438,98 @@ class DegradedRun(unittest.TestCase):
         offered = self.records[-1]["offered"]
         self.assertIn("dirty.status", offered)
         self.assertNotIn("sqlite.query", offered)
+
+
+@unittest.skipUnless(HAS_MCP, "mcp SDK not installed (run inside .venv)")
+class MultiFactBaselineRun(_RunMixin, unittest.TestCase):
+    """t10 without rules: the plan plus the double-check tail, then it runs out."""
+
+    task_id = "t10"
+    extra_args = ("--no-rules",)
+
+    def test_the_baseline_is_the_ten_step_overshoot(self):
+        # Four plan calls (one of which is a useless describe_table) and six
+        # re-checks. The task set's acceptance line is baseline >= optimal * 3,
+        # and ten is what makes "three required facts" clear it.
+        self.assertEqual(self.result.steps, 10)
+        self.assertEqual(self.result.stop_reason, "policy_exhausted")
+
+    def test_the_last_six_calls_are_the_overshoot(self):
+        # The plan is checkable against the task file; so is the boundary between
+        # "useful" and "re-assuring", which is what the compression is measured
+        # across.
+        self.assertEqual(self.records[-1]["evidence_added"], [])
+        self.assertEqual(
+            sorted(self.records[-1]["stop_check"]["evidence"]),
+            ["sql.rows.incidents", "sql.rows.labels", "sql.schema"],
+        )
+
+
+@unittest.skipUnless(HAS_MCP, "mcp SDK not installed (run inside .venv)")
+class MultiFactRun(_RunMixin, unittest.TestCase):
+    """t10 with the rules: the run ends where the *second* fact arrives."""
+
+    task_id = "t10"
+
+    def test_ten_steps_become_four(self):
+        self.assertEqual(self.result.steps, 4)
+        self.assertEqual(self.result.halt["rule"], "R4")
+        self.assertEqual(self.result.halt["state"], "HALTED_COMPLETE")
+
+    def test_the_missing_list_shrinks_one_fact_at_a_time(self):
+        # A shape-only evidence model would have declared this complete at step 3
+        # (labels had not been read yet) -- that is the D9 lesson, replayed on a
+        # second task so it is not a property of t01.
+        self.assertEqual(
+            self.records[1]["stop_check"]["missing"],
+            ["sql.rows.incidents", "sql.rows.labels"],
+        )
+        self.assertEqual(self.records[2]["stop_check"]["missing"], ["sql.rows.labels"])
+        self.assertEqual(self.records[3]["stop_check"]["missing"], [])
+        self.assertEqual(self.records[3]["evidence_added"], ["sql.rows.labels"])
+
+    def test_the_delivered_rows_answer_the_question(self):
+        incidents = [row["id"] for row in self.result.turns[2].payload["rows"]]
+        labels = {
+            row["incident_id"]: row["label"]
+            for row in self.result.turns[3].payload["rows"]
+        }
+        self.assertEqual(incidents, [2, 4], "the open incidents")
+        self.assertEqual(labels[2], "flaky")
+
+
+@unittest.skipUnless(HAS_MCP, "mcp SDK not installed (run inside .venv)")
+class PagedSpinBaselineRun(_RunMixin, unittest.TestCase):
+    """t20 without rules: pagination past the end of an empty result set."""
+
+    task_id = "t20"
+    extra_args = ("--no-rules",)
+
+    def test_the_baseline_burns_the_whole_turn_budget(self):
+        self.assertEqual(self.result.steps, 10)
+        self.assertEqual(self.result.stop_reason, "max_turns")
+
+    def test_paging_is_not_a_literal_repeat(self):
+        # Four different offsets against a repo that does not exist. If any call
+        # repeated, the run would be R1's business and the pagination story would
+        # be decoration.
+        counts = Counter((r["chosen"], r["args_hash"]) for r in self.records)
+        self.assertEqual([n for n in counts.values() if n > 1], [])
+
+    def test_every_page_returns_the_same_empty_answer(self):
+        self.assertEqual(len({r["result_digest"] for r in self.records[1:]}), 1)
+
+
+@unittest.skipUnless(HAS_MCP, "mcp SDK not installed (run inside .venv)")
+class PagedSpinRun(_RunMixin, unittest.TestCase):
+    """t20 with the rules: the third page is refused by R2, not by the budget."""
+
+    task_id = "t20"
+
+    def test_r2_fires_on_the_second_identical_page(self):
+        self.assertEqual(self.result.steps, 3)
+        self.assertEqual(self.result.halt["rule"], "R2")
+        self.assertEqual(self.result.halt["state"], "HALTED_NO_PROGRESS")
 
 
 if __name__ == "__main__":  # pragma: no cover

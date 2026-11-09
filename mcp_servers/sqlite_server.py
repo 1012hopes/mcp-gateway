@@ -51,6 +51,86 @@ SEED = {
             (4, "1012hopes/mcp-gateway", "sev3", "2026-05-09", None),
         ],
     ),
+    # -- added in D11 -----------------------------------------------------
+    # Six more tables so the task set can ask twenty *different* questions
+    # instead of twenty phrasings of the same one. Every table has a column set
+    # that makes a single readable query sufficient -- a task set that needed
+    # joins would put the SQL dialect, not the gateway, under test.
+    "commits": (
+        "CREATE TABLE commits (id INT PRIMARY KEY, repo TEXT, sha TEXT, "
+        "author TEXT, committed_at TEXT, message TEXT)",
+        [
+            (1, "p1s4/mcp-search-proxy", "a1b2c3d", "ada", "2026-03-02", "init"),
+            (2, "IBM/mcp-context-forge", "b2c3d4e", "lin", "2026-04-20", "sse transport"),
+            (3, "IBM/mcp-context-forge", "c3d4e5f", "lin", "2026-04-28", "schema drift fix"),
+            (4, "maximhq/bifrost", "d4e5f6a", "ravi", "2026-04-28", "go gateway rewrite"),
+            (5, "coral-protocol/coral", "e5f6a7b", "jun", "2026-04-30", "rust rewrite"),
+            (6, "1012hopes/mcp-gateway", "f6a7b8c", "kk", "2026-11-06", "trace: hash chain"),
+            (7, "1012hopes/mcp-gateway", "a7b8c9d", "kk", "2026-11-08", "stop: evidence complete"),
+            (8, "maximhq/bifrost", "b8c9dae", "ravi", "2026-05-01", "retry budget"),
+        ],
+    ),
+    "releases": (
+        "CREATE TABLE releases (id INT PRIMARY KEY, repo TEXT, tag TEXT, "
+        "published_at TEXT, breaking INT)",
+        [
+            (1, "p1s4/mcp-search-proxy", "v0.1.0", "2026-03-05", 0),
+            (2, "IBM/mcp-context-forge", "v2.3.1", "2026-04-10", 0),
+            (3, "maximhq/bifrost", "v1.0.0", "2026-04-28", 1),
+            (4, "coral-protocol/coral", "v0.9.0", "2026-04-30", 0),
+            (5, "IBM/mcp-context-forge", "v2.4.0", "2026-05-02", 1),
+            (6, "1012hopes/mcp-gateway", "v0.9.0", "2026-11-09", 0),
+        ],
+    ),
+    "deps": (
+        "CREATE TABLE deps (repo TEXT, package TEXT, version TEXT, "
+        "pinned INT, vulnerable INT)",
+        [
+            ("p1s4/mcp-search-proxy", "requests", "2.31.0", 1, 0),
+            ("IBM/mcp-context-forge", "pydantic", "2.6.0", 1, 1),
+            ("IBM/mcp-context-forge", "httpx", "0.27.0", 0, 0),
+            ("maximhq/bifrost", "golang.org/x/net", "0.24.0", 1, 1),
+            ("maximhq/bifrost", "golang.org/x/crypto", "0.22.0", 0, 1),
+            ("coral-protocol/coral", "serde", "1.0.200", 1, 0),
+            ("1012hopes/mcp-gateway", "anyio", "4.3.0", 1, 0),
+            ("1012hopes/mcp-gateway", "pydantic", "2.7.1", 1, 0),
+        ],
+    ),
+    "maintainers": (
+        "CREATE TABLE maintainers (repo TEXT, handle TEXT, role TEXT, since TEXT)",
+        [
+            ("p1s4/mcp-search-proxy", "ada", "lead", "2026-01-10"),
+            ("IBM/mcp-context-forge", "lin", "lead", "2025-11-02"),
+            ("IBM/mcp-context-forge", "omar", "reviewer", "2026-02-15"),
+            ("maximhq/bifrost", "ravi", "lead", "2025-09-01"),
+            ("coral-protocol/coral", "jun", "lead", "2026-01-20"),
+            ("1012hopes/mcp-gateway", "kk", "lead", "2026-11-01"),
+            ("1012hopes/mcp-gateway", "qa-bot", "triage", "2026-11-02"),
+        ],
+    ),
+    "scans": (
+        "CREATE TABLE scans (id INT PRIMARY KEY, repo TEXT, tool TEXT, "
+        "finding TEXT, severity TEXT, created_at TEXT)",
+        [
+            (1, "p1s4/mcp-search-proxy", "semgrep", "hardcoded host", "medium", "2026-03-20"),
+            (2, "IBM/mcp-context-forge", "semgrep", "tool schema not validated", "high", "2026-05-03"),
+            (3, "maximhq/bifrost", "govulncheck", "x/crypto CVE-2026-1111", "critical", "2026-05-04"),
+            (4, "coral-protocol/coral", "clippy", "unwrap in request path", "low", "2026-05-05"),
+            (5, "maximhq/bifrost", "semgrep", "missing timeout", "medium", "2026-05-06"),
+            (6, "1012hopes/mcp-gateway", "bandit", "no issues", "none", "2026-11-09"),
+        ],
+    ),
+    "labels": (
+        "CREATE TABLE labels (incident_id INT, label TEXT)",
+        [
+            (1, "regression"),
+            (1, "mcp"),
+            (2, "flaky"),
+            (3, "p1"),
+            (4, "governance"),
+            (4, "mcp"),
+        ],
+    ),
 }
 
 FORBIDDEN = (

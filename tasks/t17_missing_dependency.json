@@ -1,0 +1,22 @@
+{
+  "id": "t17",
+  "goal": "Which repo depends on 'left-pad', and is that dependency pinned? If no repo does, say so.",
+  "required_evidence": [],
+  "optimal_steps": 1,
+  "optimal_path": "sqlite.query once: the empty row set is the answer",
+  "max_turns": 10,
+  "policy": "futile_search",
+  "futile_sql": [
+    "select repo from deps where package = 'left-pad'",
+    "select repo from deps where lower(package) = 'left-pad'",
+    "select repo from deps where package like '%left-pad%'",
+    "select repo from deps where package glob 'left*'",
+    "select repo from deps where instr(package, 'left') > 0",
+    "select repo from deps where trim(package) = 'left-pad'",
+    "select repo from deps where package like 'left%'",
+    "select repo from deps where upper(package) = upper('left-pad')",
+    "select repo from deps where package like '%-pad'",
+    "select repo from deps where substr(package, 1, 4) = 'left'",
+    "select repo from deps where package != 'left-pad' and package = 'left-pad'"
+  ]
+}

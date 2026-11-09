@@ -1,0 +1,27 @@
+{
+  "id": "t10",
+  "goal": "Which incidents are still open, and which labels does each of them carry?",
+  "required_evidence": ["sql.schema", "sql.rows.incidents", "sql.rows.labels"],
+  "optimal_steps": 3,
+  "optimal_path": "sqlite.list_tables -> sqlite.query (open incidents) -> sqlite.query (labels)",
+  "plan": [
+    { "tool": "sqlite.list_tables", "args": {} },
+    { "tool": "sqlite.describe_table", "args": { "table": "incidents" } },
+    {
+      "tool": "sqlite.query",
+      "args": {
+        "sql": "select id, repo, severity from incidents where resolved_at is null order by id",
+        "limit": 50
+      }
+    },
+    {
+      "tool": "sqlite.query",
+      "args": {
+        "sql": "select incident_id, label from labels order by incident_id, label",
+        "limit": 50
+      }
+    }
+  ],
+  "max_turns": 12,
+  "policy": "declared"
+}

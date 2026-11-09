@@ -7,7 +7,7 @@
 
 一句话概括差异化：**别的网关管"谁能调"，这个管"什么时候该停"，并且能证明那次停是对的。**
 
-> 状态：**D10 / D18**（轨迹层 + 多上游 + 生命周期 + 参数归一化 + 证据模型 + R1/R2/R3/R4/R6 + run 边界与脱敏已跑通，384 tests；R5 危险动作、任务集、指标表待做）。进度见 [`PLAN.md`](PLAN.md) 与 [`docs/progress.md`](docs/progress.md)。
+> 状态：**D11 / D18**（轨迹层 + 多上游 + 生命周期 + 参数归一化 + 证据模型 + R1/R2/R3/R4/R6 + run 边界与脱敏 + 20 条任务与人工最优步数已跑通，430 tests；R5 危险动作、checker、指标表待做）。进度见 [`PLAN.md`](PLAN.md) 与 [`docs/progress.md`](docs/progress.md)。
 
 ## 它解决什么问题
 
@@ -46,7 +46,8 @@ recursion_limit = 25  # LangGraph
 | D8 | R2 无进展 + 规则集 R1/R2/R3 + **G2 演示**（**打转任务 11 步 → 3 步**） | ✅ 271 tests |
 | D9 | 证据模型（来源 + 参数谓词 + 结果形状）+ R4 证据完备 + DEGRADED（**正常任务 9 步 → 4 步**） | ✅ 331 tests |
 | D10 | run 边界声明 + 先脱敏再哈希 + `tool_calls` 串行化（**同一串调用：声明了就继续，不声明就误停**） | ✅ 384 tests |
-| D11–D12 | 20 条任务 + checker + **G3 指标表** | 待做 |
+| D11 | 20 条任务（14 生产 + 6 对抗）+ 人工最优步数 + 扫描表（**182 次调用 → 65 次，20/20 达标**） | ✅ 430 tests |
+| D12 | checker 自测 + **G3 指标表** | 待做 |
 
 ## 快速开始
 
@@ -71,6 +72,10 @@ uv run python scripts/g2_demo.py
 
 # D10：同一串调用，声明了 run 边界就继续，不声明就误停（两个进程对照）
 uv run python scripts/boundary_demo.py
+
+# D11：20 条任务 × (baseline, governed) 全跑一遍，写出 results/tasks.md
+#      任一条达不到 baseline >= optimal × 3 就以非零退出——任务集不能悄悄漂移
+uv run python scripts/task_sweep.py
 
 # G1 演示：正常运行 / 真实拔掉写权限 / 注入写盘失败
 uv run python scripts/failclosed_demo.py
@@ -213,6 +218,47 @@ degraded -- the tool that produces sql.rows.repos is not available
 
 `DEGRADED` 是终态而不是"降级后继续"：生产者是声明过的、可用工具集第一步就确定，继续跑只能为一个已成立的结论付钱。分类本身就是产出——指标表因此能把这条 run 从"停晚了"里剔除，而不是给它记一个 24 步的假超时。
 
+## 任务集：20 条，每条都有一个人工标的"最少几步"
+
+任务规格是 JSON（`tasks/*.json`），一个文件同时喂给三方：agent 拿 `plan` 去执行，网关拿 `required_evidence` 判完备，实验拿 `optimal_steps` 当基准线。14 条生产型 + 6 条对抗型（库里查不到的东西，问多少次都是空）。
+
+```json
+{
+  "id": "t10",
+  "goal": "Which incidents are still open, and which labels does each of them carry?",
+  "required_evidence": ["sql.schema", "sql.rows.incidents", "sql.rows.labels"],
+  "optimal_steps": 3,
+  "optimal_path": "list_tables -> query open incidents -> query labels",
+  "plan": [ ... 4 次调用 ... ]
+}
+```
+
+三种策略，差别只在"计划从哪来"：
+
+| policy | 计划来源 | 用在 |
+|---|---|---|
+| `reactive_sqlite` | 从上次结果推导（星数查询的 `where name in (...)` 由第 3 步算出来） | t01，唯一一条结果依赖的任务 |
+| `declared` | 任务文件里的 `plan`，跑完再进同一段"再验一遍"尾部 | 13 条生产型 |
+| `futile_search` | 任务文件里的 `futile_sql`，换措辞/换 offset 反复问同一个不可答的问题 | 6 条对抗型 |
+
+**为什么计划是数据而不是二十个 policy 类**：如果每条任务各配一段代码，"基线 8 步"里就混进了写计划那个人的水平。计划进数据、超出部分只有一段程序，才使"多出来的步数是同一个行为"这句话成立。
+
+入选线是 **`baseline ≥ optimal × 3`**，达不到的任务不进集合——它测不出任何东西。实测（`scripts/task_sweep.py` → `results/tasks.md`）：
+
+```
+  t03  optimal=2  baseline=8   governed=3   R4  HALTED_COMPLETE   PASS
+  t10  optimal=3  baseline=10  governed=4   R4  HALTED_COMPLETE   PASS
+  t16  optimal=1  baseline=10  governed=3   R2  HALTED_NO_PROGRESS PASS
+  ...
+合计 182 -> 65 次调用（基线的 36%），20/20 达标
+```
+
+三条必须一起读的话：
+
+- **受控步数 = 最优 + 1**，差的那一步是 agent 自己 `describe_table`。它不产生新事实，但也不违反任何规则——网关只在证据齐了的那次调用上收束，不做"这次看起来没用，我替你省掉"这种判断。
+- **"最优"是定规则后数出来的，不是量完回填的**：一次调用必须贡献至少一项 `required_evidence` 才算必要。逐条的最少调用路径在 [`docs/optimal-steps.md`](docs/optimal-steps.md)，包括两处已知代价（一次 join 能带回两个事实但只记一类；3 倍是筛选门槛而非研究发现）。
+- **对抗任务受控仍要 3 步**：一次空结果是"这次没有"，两次同样的空结果才是"再问也没用"。凭一次就断言不可答，会把"表里恰好没有"和"查询写错了"混为一谈。
+
 ## run 边界：为什么它必须是声明的
 
 一个对话先问"未解决的事故"，再问别的事。如果第二个问题还在同一个 run 里：
@@ -313,11 +359,12 @@ gateway/
   trace/sink.py      fail-closed 写入（写失败回滚，不留半行）
   trace/verify.py    双层校验：L1 完整性 → L2 结构，报首个异常
   trace/cli.py       verify 命令（退出码 0/1，可进 CI）
-agent/               客户端：policy（决策）/ loop（驱动）/ tasks（任务规格）
-mcp_servers/sqlite_server.py        只读 SQLite 上游（数据固定可复现）
+agent/               客户端：policy（reactive / declared / futile）/ loop（驱动）/ tasks（任务规格）
+mcp_servers/sqlite_server.py        只读 SQLite 上游（8 张表，数据固定可复现）
 mcp_servers/dirty_schema_server.py  故意不合规的上游（$ref / oneOf / 非法名）
-tasks/t01_unresolved_incidents.json  正常任务：目标 + 必需证据 + 轮数上限
-tasks/t02_unanswerable_repo.json     对抗任务：库里没有的 repo，专门诱发"换个说法再问"
+tasks/t01_unresolved_incidents.json 正常任务：唯一一条结果依赖的（reactive）
+tasks/t03..t15_*.json               13 条生产型：声明式计划 + required evidence
+tasks/t02,t16..t20_*.json           6 条对抗型：查不到的东西，问多少次都是空
 config/gateway.json                 上游、trace 目录、证据模型路径
 config/evidence.json                冻结的证据模型（谁能生产、问什么、什么形状）
 config/schema-manifest.json         冻结的工具契约（入库，改上游后重跑冻结）
@@ -326,9 +373,12 @@ scripts/agent_demo.py               基线 vs 受控，同一任务两遍 + 10 �
 scripts/g2_demo.py                  G2：打转任务 11 步 -> 3 步 + 8 项自检
 scripts/evidence_demo.py            D9：R4 收束 + 答案检查 + DEGRADED + 12 项自检
 scripts/boundary_demo.py            D10：同一串调用，声明了就继续、不声明就误停 + 12 项自检
+scripts/task_sweep.py               D11：20 条任务 × (baseline, governed) -> results/tasks.md
 scripts/failclosed_demo.py          G1 的 S1/S2/S3
 scripts/tamper_demo.py              8 个篡改用例
 scripts/freeze_schema.py            冻结 / `--check` 检查 schema 漂移
+docs/optimal-steps.md               最优步数怎么数：规则、逐条路径、四条已知代价
+results/tasks.md                    扫描表（生成物，随 commit 更新）
 docs/demo-g1.md                     G1 台词与录屏脚本
 docs/demo-g2.md                     G2 台词与录屏脚本
 ```
@@ -363,6 +413,8 @@ docs/demo-g2.md                     G2 台词与录屏脚本
 - **run 边界靠调用方声明，不靠推断**：网关没有"用户说了新问题"这个信号，只有工具调用，所以边界来自 `_meta.gateway.task`。一个**不声明**的客户端永远不分叉，会退化成"所有话题共用一个 run"——那正是误停的来源。代价是接入方必须配合：这个项目的形态是"网关 + 它认识的客户端"，不是"任何 MCP 客户端插上就有用"
 - **脱敏只认声明过的键名与已知凭据形态**：`{"credential": ...}` 会被隐藏，`{"blob": "..."}` 不会，除非它长得像 `ghp_` / `sk-` / `AKIA` / `Bearer`。取向是"宁可漏掉一个秘密，不可并掉两个调用"——反过来做，误停会先于泄露发生
 - **串行化是进程内的一把锁**：它保证本进程的轨迹线性、证据集不竞态，但不解决多进程同时写同一 `trace_dir` 的问题（各自成链、互不干扰，但没有跨 run 的偏序）
+- **受控步数天然比最优多 1**：agent 常先 `describe_table` 再写 SQL，那一步不产生新事实却必须付钱。网关只在证据齐了的那次调用上收束，不会替 agent 判断"这次看起来没用"——那正是它拒绝替 agent 做的判断。`governed = optimal + 1` 是设计结果，不是判据漏了
+- **"基线 ≥ 最优 × 3"部分是任务挑选的结果**：20 条任务的基线是同一条再验尾部（重复上次查询 → count → describe → list_tables → 换 limit 再问），所以这条线筛掉的是"9 步 vs 8 步"这类测不出东西的任务，不是研究发现。真结论在两列的绝对差与"停在哪条规则上"
 - 参数在 20 条任务上标定，样本量不做显著性检验，只报配对差值
 
 ## License

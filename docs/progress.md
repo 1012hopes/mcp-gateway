@@ -13,6 +13,7 @@
 | D8（11-09） | 完成 | `rules/no_progress.py` + `stop_check.state_hash`（schema v1→v2）+ 对抗任务 `t02`；**G2：11 步 → 3 步**，R2 在第二个相同答案处收束，基线 11 步全程无逐字重复（证明不是 R1 抓的）；271 tests | D9：证据模型 + R4 + DEGRADED |
 | D9（11-09） | 完成 | `gateway/evidence.py` + `config/evidence.json` + `rules/evidence_complete.py`（R4）+ `rules/unreachable.py`（R6，`DEGRADED`）；t01 **9 步 → 4 步**，R4 在最后一项证据到达处收束，checker 独立复核交付结果；缺生产者的配置 **1 步**收束、零上游调用；331 tests | D10：run 边界 + 脱敏顺序 + 串行化 |
 | D10（11-09） | 完成 | `gateway/boundary.py`（`_meta.gateway` 声明）+ `gateway/policy.py`（先脱敏再哈希）+ `session.next_run` + `handle_call_tool` 串行锁 + schema v2→v3（`task_id`）；`boundary_demo.py` **12 项自检全 PASS**：不声明 → 第二个话题被 R1 误停，声明 → 三 run 三文件、追问 `evidence_added=[]` 零重读、换题重新读；384 tests | D11：20 条任务集 + 人工最优步数 |
+| D11（11-09） | 完成 | 8 张表的演示库 + 9 个 `ev_type` + `agent/policy.py` 的 `DeclaredPolicy`（计划从数据来、再验尾部是同一段程序）+ 20 条任务（14 生产 + 6 对抗）+ `task_sweep.py`；**182 → 65 次调用（36%），20/20 满足 `baseline ≥ optimal × 3`**；430 tests | D12：checker 自测 + 指标表 |
 
 ## D1 完成判据核对
 
@@ -260,3 +261,35 @@ old formula: steps where it would see an unchanged state: none
 21. **schema v2 → v3（`task_id` 可选键）。** 一个 run 一个文件之后，"哪个文件属于哪个任务"若无字段只能靠文件名或时序去猜。沿用 D8 的口径：可选键**缺省即不出现**，必需字段表与 v2 相同，`seal()` 只写 v3、可读 1/2/3。`traces/samples/demo-12-steps.jsonl` 随之重新生成（字节变化 12 行）。
 22. **脱敏落 `gateway/policy.py`（计划写 `policy/redact.py`），并扩展到 `result_digest`。** 目录里没有 `policy/`；`DESIGN` 2.2 原本就把"白名单 / 预算 / 审批 / 脱敏"放在 `gateway/policy.py`。FR-14 只说 `args_hash`，但两个只有返回凭据不同的答案否则永远不会看起来相同，R2 的平台期就永远形不成——同一个论证，扩到结果摘要。
 23. **`agent/loop.run_task` 现在会传 `--task-id`。** 一个进程一条任务时这是"声明"，也是后续 `_meta` 变化能被判定为边界的前提；不带它，第一次声明会被当成"从空到 t01"的边界。
+
+## D11 完成判据核对
+
+| 判据（`PLAN.md`） | 结果 |
+|---|---|
+| 20 条全部可跑通基线 | `scripts/task_sweep.py`：20 条 × 2 遍（`--no-rules` / 默认），**40 个 run 全部落盘并退出 0**；基线各自停在 `policy_exhausted`（生产型）或 `max_turns`（对抗型），没有一条依赖"回滚 commit 才有的分母"。表在 `results/tasks.md` |
+| 每条最优步数已标 | 20/20 有 `optimal_steps` 且有 `optimal_path`（最少调用路径的文字版）；规则与逐条路径在 `docs/optimal-steps.md`；`tests/test_taskset.py::test_every_task_has_a_hand_counted_optimum` 禁止缺项（缺失即"未完成"，不是"以后补"） |
+| 含 6 条"必然打转"的对抗任务 | `t02`、`t16`–`t20`，覆盖三种死路：不存在的 repo（t02/t20）、不存在的标签/依赖/tag/维护者（t16–t19）、翻页越过末尾（t20）。6 条的基线都是 10–11 步、受控都是 3 步、都由 **R2** 收束 |
+| 入选线 `baseline ≥ optimal × 3` | 20/20 达标，最低 3.00（t01），最高 11.00（t02）；扫描脚本对任一条不达标**以非零退出**，不让任务集悄悄漂移 |
+
+## D11 的六个发现
+
+**1. 计划进数据文件，超出的部分才进代码——否则"基线步数"测的是写计划的人。** 若二十条任务各配一个 policy 类，"基线 8 步"里就混进了计划者的水平，`baseline / optimal` 不再是同一个行为的度量。所以 `plan` 是 `tasks/*.json` 里的数据，而"再验一遍"的尾部（重复上次查询 → `count_rows` → `describe_table` → `list_tables` → 换 `limit` 再问）是**一段程序**，二十条任务共用。这也是唯一能诚实地写"多出来的步数是同一个行为"的写法。
+
+**2. 尾部第一项是计划最后一项的逐字重复，于是锚点必须取"首次出现"。** `_tail_done` 靠"计划最后一动在历史里的位置"算已经验了几轮。若用**最后**一次出现，尾部第一步就把锚点往后推，`done` 永远是 0，循环卡在第一次复查上——`ReactivePolicy` 的注释里记的是同一个坑的**反面**（那里锚点不能取"看起来有用的最后一次"）。两边都说明：这个锚点不是实现细节，是这条策略能停下来的唯一原因。测试 `test_the_tail_never_stops_advancing` 钉住。
+
+**3. 表一多，"证据类型 = 表"这个粒度立刻不够用。** `severity` 同时在 `incidents` 和 `scans` 里，只看列名会把"扫描发现的严重度"记成"事故的严重度"。所以每个 `sql.rows.*` 的 args 谓词都必须带**表名**（`contains "from scans"`），和 D9 里 `sql.rows` 必须拆成 `.incidents` / `.repos` 是同一条理由，只是这次是横向扩展暴露出来的。
+
+**4. "重复清单必须 ≥ 轮数上限"是个静默约束。** 对抗任务的 `futile_sql` 若比 `max_turns` 短，循环会绕回、出现**逐字重复**的调用，R1 抢先命中，而任务仍然报"11 步 → 3 步"——看上去完全正常，测的却是另一条规则。单靠人眼看不出来，所以 `test_the_spin_never_wraps_around` 把它变成了断言（`len(futile_sql) >= max_turns`，且语句两两不同）。
+
+**5. 受控步数比最优多 1，多出来的那一步是 agent 的谨慎，不是判据的漏洞。** 13 条生产型任务的计划都以 `describe_table` 开头——agent 不确定列名。它不产生新事实，但网关不会拦：钱已经付了，结果也是合法答案的一部分。网关只在**证据齐了**的那次调用上收束，不做"这次看起来没用，我替你省掉"这种判断，因为那种判断需要的正是本项目拒绝替 agent 做的东西。`governed = optimal + 1` 因此是设计结果。
+
+**6. "3 倍"是入选门槛，不是研究发现。** 尾部是固定长度的程序，所以比值主要由"每条任务需要几个事实"决定（1 个事实 → 8 步，2 个 → 10 步）。它的作用是筛掉"9 步 vs 8 步"这类测不出东西的任务。真正的结论在两列的绝对差和"停在哪条规则上"——这两项不随任务挑选而变。
+
+## D11 追加的五条偏差
+
+24. **任务文件仍是 JSON，不是计划里写的 `tasks/*.yaml`。** D6 起就是 JSON（零依赖、diff 可读，同 `config.py` 的理由）。计划与实现的这处差异一直都存在，只是到 D11 才值得在计划里记一笔。
+25. **"20 条任务"的实现方式是 `plan` 数据 + 公共再验尾部，不是二十个策略类。** 代价写清楚了：**计划不能依赖上一步的结果**，所以只有 t01（星数查询由 incident 行算出来）留在 `reactive_sqlite`，其余 13 条是固定计划。这条限制在 `docs/optimal-steps.md` 与 `DESIGN` 6.19 里都记了。
+26. **"最优步数"补了操作定义**：一次调用必须贡献至少一项 `required_evidence` 才算必要。于是生产型最优 = `required` 条数，对抗型 = 1。不补的话"最小充分步数"只是形容词——agent 自己探结构的那一步算不算，两个人会给出两个数。
+27. **6 条对抗任务覆盖三种死路，但共用同一个信号**（答案逐字节重复）。这是刻意的：给每种死路配一条专用规则，结论就变成"我认得这六种情况"，而不是"平台期本身可判"。
+28. **`results/tasks.md` 作为生成物入库。** 它与 `traces/samples/` 同类：可复现、可 diff。某次改动让某条任务的步数变了，diff 里会直接看到，而不是等 D12 的指标表才发现"数字对不上"。
+29. **D10 遗留缺陷：`tests/test_run_boundary.py` 在类体里构造规则。** `rules: tuple = (DuplicateCall(),)` 是类体语句，import 期就执行，早于 `skipUnless`——裸解释器上直接 `NameError: name 'DuplicateCall' is not defined`，报的还是与依赖无关的错。这和 D9 修过的 `ScriptedPolicy` 是同一个坑，只是换了个文件，说明"类体里不碰受 SDK 守卫的名字"当时只修了现场、没写进规矩。改法相同：类体只声明**名字**（`rule_names`），`setUp` 里按需实例化。裸解释器现在 **298 tests / 0 error / 132 skipped**（原 279 / 1 error）。

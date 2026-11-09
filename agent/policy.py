@@ -24,6 +24,7 @@ state would make replay depend on the replay itself.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
@@ -34,6 +35,7 @@ from .tasks import TaskSpec
 __all__ = [
     "Action",
     "AgentContext",
+    "DeclaredPolicy",
     "FutileSearchPolicy",
     "Observation",
     "Policy",
@@ -200,10 +202,15 @@ class FutileSearchPolicy:
                 if "sqlite.list_tables" in ctx.tools
                 else None
             )
-        position = (len(ctx.history) - 1) % len(FUTILE_SQL)
+        # The rephrasings are per task: "repo does not exist" and "label was
+        # never used" are the same behaviour over different tables, and putting
+        # the statements in the task file keeps one policy honest for all six
+        # adversarial tasks instead of six near-copies of this method.
+        statements = tuple(ctx.task.futile_sql) or FUTILE_SQL
+        position = (len(ctx.history) - 1) % len(statements)
         if "sqlite.query" not in ctx.tools:
             return None
-        return Action("sqlite.query", {"sql": FUTILE_SQL[position], "limit": 20})
+        return Action("sqlite.query", {"sql": statements[position], "limit": 20})
 
 
 class ReactivePolicy:
@@ -317,6 +324,104 @@ class ReactivePolicy:
         return None
 
 
+class DeclaredPolicy:
+    """Run a declared plan, then double-check it until the ideas run out.
+
+    Why a declared plan and not twenty hand-written planners: the quantity under
+    test is "how many of these calls were necessary", and a planner that
+    re-queries by accident would put its own quality inside that number. The
+    plan is in the task file so a reviewer can check it against the goal without
+    reading Python -- and so the overshoot below stays the only "behaviour" left.
+
+    The overshoot is deliberately *generic*: the same five or six "just to be
+    sure" calls for every task, derived from the plan rather than written per
+    task. If it were written per task, "baseline / optimal >= 3" would be true by
+    construction and say nothing; as a fixed routine it is a property of the
+    agent archetype, and the tasks were selected to be ones where it dominates.
+    """
+
+    name = "declared"
+
+    def next_action(self, ctx: AgentContext) -> Optional[Action]:
+        plan = [Action(step.tool, dict(step.args)) for step in ctx.task.plan]
+        if not plan:
+            return None
+
+        for action in plan:
+            if action.tool not in ctx.tools:
+                # Not offered is not the same as not done: skip it rather than
+                # spin (D14 will shrink ``offered`` and this must not become an
+                # infinite loop the day it does).
+                continue
+            if not self._performed(ctx.history, action):
+                return action
+
+        tail = self._tail(ctx, plan)
+        done = self._tail_done(ctx.history, plan)
+        return tail[done] if done < len(tail) else None
+
+    # -- the useful phase --------------------------------------------------
+
+    @staticmethod
+    def _performed(history: Sequence[Observation], action: Action) -> bool:
+        return any(obs.asked(action.tool, action.args) for obs in history)
+
+    # -- the overshoot ------------------------------------------------------
+
+    def _tail(self, ctx: AgentContext, plan: Sequence[Action]) -> List[Action]:
+        """The "am I sure?" phase, built from the plan's last query.
+
+        Every entry here is a call a careful agent really does make after it
+        believes it is finished. None of them adds a fact: re-asking a question
+        returns an answer it already has, ``count_rows`` returns a number where
+        the evidence model wants rows, and ``describe_table`` re-reads structure
+        it already read.
+        """
+        queries = [action for action in plan if action.tool.endswith(".query")]
+        if not queries:
+            return []
+        last = queries[-1]
+        table = _table_of(str(last.args.get("sql", "")))
+
+        tail: List[Action] = [last]  # exact repeat: R1's target
+        if table:
+            tail.append(Action("sqlite.count_rows", {"table": table}))
+            tail.append(Action("sqlite.describe_table", {"table": table}))
+        tail.append(Action("sqlite.list_tables", {}))
+        tail.append(Action("sqlite.query", {**last.args, "limit": 1}))
+        if len(queries) > 1:
+            # Two facts in, two facts to re-check. One re-read per query is what
+            # "double-check the answer" means when the answer has two halves.
+            tail.append(Action("sqlite.query", {**queries[0].args, "limit": 10}))
+        return [action for action in tail if action.tool in ctx.tools]
+
+    @staticmethod
+    def _tail_done(history: Sequence[Observation], plan: Sequence[Action]) -> int:
+        """How many tail calls already happened.
+
+        Anchored to the *first* occurrence of the plan's last action, not the
+        last. The tail opens with an exact repeat of that action, so a
+        last-occurrence anchor would move forward on every step and the loop
+        would never advance past the first re-check -- the same trap
+        ``ReactivePolicy`` documents, in the opposite direction. Requiring plan
+        steps to be distinct (``tests/test_taskset.py``) is what makes "first
+        occurrence" the plan step rather than an earlier identical one.
+        """
+        anchor = plan[-1]
+        for position, obs in enumerate(history):
+            if obs.asked(anchor.tool, anchor.args):
+                return len(history) - position - 1
+        return 0
+
+
+_TABLE_RE = re.compile(r"\bfrom\s+([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
+
+
+def _table_of(sql: str) -> Optional[str]:
+    match = _TABLE_RE.search(sql)
+    return match.group(1) if match else None
+
+
 class ScriptedPolicy:
     """A fixed list of calls. For tests that need the gateway, not the agent."""
 
@@ -335,4 +440,6 @@ def policy_for(name: str) -> Policy:
         return ReactivePolicy()
     if name in ("futile_search", "futile"):
         return FutileSearchPolicy()
+    if name in ("declared", "plan"):
+        return DeclaredPolicy()
     raise ValueError(f"unknown policy {name!r}")

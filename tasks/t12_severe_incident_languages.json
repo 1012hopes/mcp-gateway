@@ -1,0 +1,27 @@
+{
+  "id": "t12",
+  "goal": "List the sev1 and sev2 incidents together with the language of each affected repo.",
+  "required_evidence": ["sql.schema", "sql.rows.incidents", "sql.rows.repos"],
+  "optimal_steps": 3,
+  "optimal_path": "sqlite.list_tables -> sqlite.query (sev1/sev2 incidents) -> sqlite.query (repos)",
+  "plan": [
+    { "tool": "sqlite.list_tables", "args": {} },
+    { "tool": "sqlite.describe_table", "args": { "table": "incidents" } },
+    {
+      "tool": "sqlite.query",
+      "args": {
+        "sql": "select id, repo, severity from incidents where severity in ('sev1', 'sev2') order by id",
+        "limit": 50
+      }
+    },
+    {
+      "tool": "sqlite.query",
+      "args": {
+        "sql": "select name, language from repos order by name",
+        "limit": 50
+      }
+    }
+  ],
+  "max_turns": 12,
+  "policy": "declared"
+}

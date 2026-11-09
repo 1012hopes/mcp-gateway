@@ -14,11 +14,40 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-__all__ = ["TaskSpec", "load_task", "load_tasks", "TASK_DIR"]
+__all__ = ["PlanStep", "TaskSpec", "load_task", "load_tasks", "TASK_DIR"]
 
 TASK_DIR = Path(__file__).resolve().parents[1] / "tasks"
+
+
+@dataclass(frozen=True)
+class PlanStep:
+    """One call the agent intends to make.
+
+    Declared rather than derived for most tasks. The alternative -- one
+    hand-written policy class per question -- would put the planner's quality
+    inside the measurement: a task set where "9 steps" partly means "this
+    closure happened to re-query" cannot support "the gateway cut it to 4".
+
+    What stays emergent is the *part that must be*: ``ReactivePolicy`` still
+    builds its enrichment query from the previous result (t01), and the
+    overshoot tail (``DeclaredPolicy._tail``) is a program, not a list.
+    """
+
+    tool: str
+    args: Mapping[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "PlanStep":
+        tool = data.get("tool")
+        if not isinstance(tool, str) or not tool.strip():
+            raise ValueError(f"plan step needs a tool name, got {tool!r}")
+        args = data.get("args") or {}
+        if not isinstance(args, dict):
+            raise ValueError(f"plan step args must be an object, got {type(args).__name__}")
+        return cls(tool=tool, args=dict(args))
+
 
 
 @dataclass(frozen=True)
@@ -34,6 +63,17 @@ class TaskSpec:
     policy: str = "reactive_sqlite"
     #: Filled by D11/D12; absent here rather than faked.
     optimal_steps: Optional[int] = None
+    #: How that number was arrived at, in words. Required by D11 for every task:
+    #: a step count with no stated method is a number a reviewer has to trust.
+    optimal_path: str = ""
+    #: The declared plan (``policy: "declared"``). Empty for the reactive task,
+    #: whose plan depends on what the previous call returned.
+    plan: Tuple[PlanStep, ...] = ()
+    #: For ``policy: "futile_search"``: the rephrasings the adversary cycles
+    #: through. At least ``max_turns`` of them, so the spin never repeats a call
+    #: exactly -- a repeat would hand the job to R1 and the task would stop
+    #: measuring R2 (see ``tests/test_taskset.py``).
+    futile_sql: Tuple[str, ...] = ()
     checker: Optional[str] = None
     source: Optional[Path] = None
 
@@ -42,6 +82,10 @@ class TaskSpec:
         required = data.get("required_evidence") or ()
         if isinstance(required, str):
             raise ValueError("required_evidence must be a list, not a string")
+        plan = tuple(PlanStep.from_dict(item) for item in (data.get("plan") or ()))
+        futile = data.get("futile_sql") or ()
+        if isinstance(futile, str):
+            raise ValueError("futile_sql must be a list of statements, not a string")
         return cls(
             id=str(data["id"]),
             goal=str(data.get("goal", "")),
@@ -50,6 +94,9 @@ class TaskSpec:
             max_calls=(int(data["max_calls"]) if data.get("max_calls") is not None else None),
             policy=str(data.get("policy", "reactive_sqlite")),
             optimal_steps=data.get("optimal_steps"),
+            optimal_path=str(data.get("optimal_path", "")),
+            plan=plan,
+            futile_sql=tuple(str(item) for item in futile),
             checker=data.get("checker"),
             source=source,
         )

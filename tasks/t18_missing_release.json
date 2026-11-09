@@ -1,0 +1,22 @@
+{
+  "id": "t18",
+  "goal": "Which repo published release v9.9.9, and was it breaking? If no repo did, say so.",
+  "required_evidence": [],
+  "optimal_steps": 1,
+  "optimal_path": "sqlite.query once: the empty row set is the answer",
+  "max_turns": 10,
+  "policy": "futile_search",
+  "futile_sql": [
+    "select repo from releases where tag = 'v9.9.9'",
+    "select repo from releases where lower(tag) = 'v9.9.9'",
+    "select repo from releases where tag like '%9.9.9%'",
+    "select repo from releases where tag glob 'v9*'",
+    "select repo from releases where instr(tag, '9.9.9') > 0",
+    "select repo from releases where trim(tag) = 'v9.9.9'",
+    "select repo from releases where tag like 'v9%'",
+    "select repo from releases where upper(tag) = upper('v9.9.9')",
+    "select repo from releases where tag like '%.9.9'",
+    "select repo from releases where substr(tag, 1, 2) = 'v9'",
+    "select repo from releases where tag != 'v9.9.9' and tag = 'v9.9.9'"
+  ]
+}

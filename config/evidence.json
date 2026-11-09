@@ -7,7 +7,7 @@
       "producers": ["sqlite.list_tables", "sqlite.describe_table"]
     },
     "sql.rows.incidents": {
-      "why": "The incident rows were read. An empty row set still counts: asking and finding nothing is knowledge, and requiring non-empty rows would let t02 burn its whole budget on a question whose answer is 'not there'.",
+      "why": "The incident rows were read. An empty row set still counts: asking and finding nothing is knowledge, and requiring non-empty rows would let an unanswerable task burn its whole budget on a question whose answer is 'not there'.",
       "shapes": [["rows"]],
       "producers": ["sqlite.query"],
       "args": [{ "key": "sql", "op": "contains", "value": "from incidents" }]
@@ -17,6 +17,42 @@
       "shapes": [["rows"]],
       "producers": ["sqlite.query"],
       "args": [{ "key": "sql", "op": "contains", "value": "from repos" }]
+    },
+    "sql.rows.commits": {
+      "why": "Commit rows were read. Not the same fact as 'how many commits': count_rows returns {\"table\", \"count\"} and is deliberately not in this type's shapes, so a run that counted commits has not read them.",
+      "shapes": [["rows"]],
+      "producers": ["sqlite.query"],
+      "args": [{ "key": "sql", "op": "contains", "value": "from commits" }]
+    },
+    "sql.rows.releases": {
+      "why": "Release rows were read. A tag name in the question does not make a tag row a fact -- the row has to come back.",
+      "shapes": [["rows"]],
+      "producers": ["sqlite.query"],
+      "args": [{ "key": "sql", "op": "contains", "value": "from releases" }]
+    },
+    "sql.rows.deps": {
+      "why": "Dependency rows were read, including whether they are pinned and whether they are flagged vulnerable.",
+      "shapes": [["rows"]],
+      "producers": ["sqlite.query"],
+      "args": [{ "key": "sql", "op": "contains", "value": "from deps" }]
+    },
+    "sql.rows.maintainers": {
+      "why": "Maintainer rows were read. A handle mentioned in the goal is not evidence; the row that maps handle to repo and role is.",
+      "shapes": [["rows"]],
+      "producers": ["sqlite.query"],
+      "args": [{ "key": "sql", "op": "contains", "value": "from maintainers" }]
+    },
+    "sql.rows.scans": {
+      "why": "Scan findings were read. Severity strings also appear in incidents, so the predicate names the table: the same word in two tables is two facts.",
+      "shapes": [["rows"]],
+      "producers": ["sqlite.query"],
+      "args": [{ "key": "sql", "op": "contains", "value": "from scans" }]
+    },
+    "sql.rows.labels": {
+      "why": "Label rows were read. The join key (incident_id) lives in the rows, not in the question, so only reading them answers 'which labels'.",
+      "shapes": [["rows"]],
+      "producers": ["sqlite.query"],
+      "args": [{ "key": "sql", "op": "contains", "value": "from labels" }]
     }
   }
 }

@@ -1,0 +1,20 @@
+{
+  "id": "t11",
+  "goal": "Which repos have a maintainer whose role is 'triage'?",
+  "required_evidence": ["sql.schema", "sql.rows.maintainers"],
+  "optimal_steps": 2,
+  "optimal_path": "sqlite.list_tables -> sqlite.query (maintainers where role = 'triage')",
+  "plan": [
+    { "tool": "sqlite.list_tables", "args": {} },
+    { "tool": "sqlite.describe_table", "args": { "table": "maintainers" } },
+    {
+      "tool": "sqlite.query",
+      "args": {
+        "sql": "select repo, handle, since from maintainers where role = 'triage' order by repo",
+        "limit": 50
+      }
+    }
+  ],
+  "max_turns": 12,
+  "policy": "declared"
+}

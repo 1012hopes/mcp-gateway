@@ -50,8 +50,9 @@ recursion_limit = 25  # LangGraph
 ## 快速开始
 
 ```bash
-# 轨迹层零依赖，裸解释器就能跑（需要 SDK 的用例会自动 skip）
-py -3.12 -m unittest discover -s tests -t .
+# 全量测试必须在虚拟环境里跑：需要 SDK 的用例会在裸解释器上 skip，
+# 但 `tests/test_agent_e2e.py` 的收集阶段就会因缺少 SDK 而失败。
+uv run python -m unittest discover -s tests -t .
 
 # 端到端：agent -> 网关 -> sqlite 上游 -> 轨迹落盘 -> verify
 uv sync

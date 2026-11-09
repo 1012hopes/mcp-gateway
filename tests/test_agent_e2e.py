@@ -76,14 +76,24 @@ class _RunMixin:
     extra_args: tuple = ()
     task_id: str = "t01"
     policy: Optional[object] = None
+    #: Calls for a scripted policy, as ``(tool, args)`` pairs. Built inside
+    #: ``setUpClass`` rather than in the class body on purpose: a class body runs
+    #: at import time, *before* the ``skipUnless`` decorator can skip anything,
+    #: so ``ScriptedPolicy(...)`` up there would make collection fail on an
+    #: interpreter without the SDK -- with a ``NameError`` that says nothing
+    #: about the missing dependency and defeats the guard it sits under.
+    script: tuple = ()
 
     @classmethod
     def setUpClass(cls) -> None:
         cls._tmp = tempfile.TemporaryDirectory()
         tasks = {task.id: task for task in load_tasks()}
+        policy = cls.policy
+        if policy is None and cls.script:
+            policy = ScriptedPolicy([Action(tool, args) for tool, args in cls.script])
         cls.result = run_task_sync(
             tasks[cls.task_id],
-            policy=cls.policy,
+            policy=policy,
             run_id=cls.__name__.lower(),
             trace_dir=Path(cls._tmp.name),
             extra_args=list(cls.extra_args),
@@ -244,12 +254,10 @@ class BudgetRun(_RunMixin, unittest.TestCase):
 class DuplicateRun(_RunMixin, unittest.TestCase):
     """R1 installed: the duplicate is refused before it reaches the upstream."""
 
-    policy = ScriptedPolicy(
-        [
-            Action("sqlite.list_tables", {}),
-            Action("sqlite.list_tables", {}),
-            Action("sqlite.query", {"sql": "select 1"}),
-        ]
+    script = (
+        ("sqlite.list_tables", {}),
+        ("sqlite.list_tables", {}),
+        ("sqlite.query", {"sql": "select 1"}),
     )
 
     def test_r1_fires_before_the_upstream_is_touched(self):

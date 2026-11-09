@@ -1,20 +1,25 @@
 """D7 acceptance in one command: the same task twice -- without rules, then with.
 
     {python} scripts/agent_demo.py
-    {python} scripts/agent_demo.py --max-calls 3     # force R3 instead of R1
+    {python} scripts/agent_demo.py --max-calls 3     # force R3 instead of R4
 
 Two runs of the *same* task and the *same* policy. The only difference is whether
 the gateway has criteria installed, which is what makes the step counts
 comparable: any change in behaviour is attributable to the rules, not to a
 different agent.
 
+Since D9 the governed run stops on R4 (completeness) at step 4, so this script is
+now a *regression* harness for the whole rule set rather than a demonstration of
+R1: the checks below are deliberately rule-agnostic ("stops on a rule", "shorter
+than the baseline") so installing another criterion does not invalidate them.
+
 What it prints and checks:
 
 1. the baseline overshoots and ends because the policy ran out of ideas (the D6
    measurement, still reproducible through ``--no-rules``);
 2. the governed run stops on a rule, and the trace says which one and why;
-3. the duplicate R1 fires on is still *visible* in the baseline -- otherwise
-   "caught" would mean "the harness avoided it";
+3. the calls the baseline wastes are still *visible* in it -- otherwise "saved"
+   would mean "the harness avoided them";
 4. every record carries ``offered`` / ``chosen`` / ``prev_hash``, and both traces
    verify. The rules change when a run ends, never what gets recorded.
 
@@ -26,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List
@@ -71,7 +77,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--task", default=None, help="task id (default: first task)")
     parser.add_argument("--trace-dir", default=None)
-    parser.add_argument("--run-id", default=None)
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="prefix for the two trace files (default: unique, so a second run "
+        "cannot append to the first one's chain)",
+    )
     parser.add_argument(
         "--max-calls",
         type=int,
@@ -86,7 +97,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     task = next((t for t in tasks if t.id == args.task), tasks[0])
     trace_dir = Path(args.trace_dir) if args.trace_dir else None
-    run_id = args.run_id or "run-d7-demo"
+    # A trace file is a chain and the sink resumes an existing one, so a fixed
+    # default would append run 2 to run 1 -- a file that verifies while
+    # describing two runs. Unique by default; an explicit id is the caller's
+    # choice.
+    run_id = args.run_id or f"run-d7-demo-{uuid.uuid4().hex[:6]}"
 
     print(f"task {task.id}: {task.goal}")
     print(f"required evidence: {', '.join(task.required_evidence) or '(none)'}")

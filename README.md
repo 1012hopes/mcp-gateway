@@ -7,7 +7,7 @@
 
 一句话概括差异化：**别的网关管"谁能调"，这个管"什么时候该停"，并且能证明那次停是对的。**
 
-> 状态：**D8 / D18**（轨迹层 + 多上游 + 生命周期 + 参数归一化 + R1 重复 / R2 无进展 / R3 预算已跑通；R4 证据完备与证据集待做）。进度见 [`PLAN.md`](PLAN.md) 与 [`docs/progress.md`](docs/progress.md)。
+> 状态：**D9 / D18**（轨迹层 + 多上游 + 生命周期 + 参数归一化 + 证据模型 + R1/R2/R3/R4/R6 已跑通；R5 危险动作、run 边界、任务集、指标表待做）。进度见 [`PLAN.md`](PLAN.md) 与 [`docs/progress.md`](docs/progress.md)。
 
 ## 它解决什么问题
 
@@ -44,7 +44,7 @@ recursion_limit = 25  # LangGraph
 | D6 | 生命周期接线 + 证据/预算上下文 + Agent 循环 + 完整轨迹 | ✅ 182 tests |
 | D7 | 参数归一化 + R1 重复调用 + R3 预算（**同任务 9 步 → 5 步**） | ✅ 241 tests |
 | D8 | R2 无进展 + 规则集 R1/R2/R3 + **G2 演示**（**打转任务 11 步 → 3 步**） | ✅ 271 tests |
-| D9 | 证据模型 + R4 证据完备 + DEGRADED | 待做 |
+| D9 | 证据模型（来源 + 参数谓词 + 结果形状）+ R4 证据完备 + DEGRADED（**正常任务 9 步 → 4 步**） | ✅ 331 tests |
 | D10–D12 | run 边界 + 20 条任务 + checker + **G3 指标表** | 待做 |
 
 ## 快速开始
@@ -59,7 +59,10 @@ uv run python scripts/echo_client.py
 
 # D6/D7：同一条任务跑两遍（无规则 vs 有规则），对比步数并自检
 uv run python scripts/agent_demo.py
-uv run python scripts/agent_demo.py --max-calls 3    # 用 R3 收束而不是 R1
+uv run python scripts/agent_demo.py --max-calls 3    # 用 R3 收束而不是 R4
+
+# D9：R4 在证据齐备处收束 + 独立检查答案 + 一个不可能完成的任务降级
+uv run python scripts/evidence_demo.py
 
 # G2 演示：一条必然打转的任务，11 步压到 3 步，平台期在轨迹里可见
 uv run python scripts/g2_demo.py
@@ -88,25 +91,25 @@ python -m gateway.trace verify traces/samples/demo-12-steps.jsonl
 
 **为什么轨迹层零依赖**：它是整个项目的证据底座，不该因为某个包升级而写不出记录。`upstream.py` / `transport.py` 才依赖官方 MCP SDK（`mcp>=2.3`）。
 
-## 一次 run 的七个步骤（D6 接线，D7 起真的有规则在里面）
+## 一次 run 的七个步骤
 
 | # | 做什么 | 在哪 | 出错时 |
 |---|---|---|---|
 | 1 | 收到 `tools/call` | `transport.handle_call_tool` | — |
-| 2 | **前置守卫**：危险动作 / 重复调用 | `stop` 的 `pre` 阶段 | 不触达上游，仍写一条记录（R1 回填上次结果） |
+| 2 | **前置守卫**：危险动作 / 重复调用 / 证据不可得 | `stop` 的 `pre` 阶段 | 不触达上游，仍写一条记录（R1 回填上次结果，R6 直接 DEGRADED） |
 | 3 | 转发上游（超时 + 失败归一） | `_forward` | 变成 error 结果，不中断 |
-| 4 | 结果归一 → 抽取证据增量 | `session.extract_evidence`（D9） | 记 `evidence_added: []` |
+| 4 | 判截断 → 抽取证据增量 | `gateway/evidence.py` | `truncated` 的结果不算证据，记 `evidence_added: []` |
 | 5 | **后置判定**：证据完备 / 无进展 / 预算 | `stop` 的 `post` 阶段 | 产出 `stop_check` 断言 |
 | 6 | 写记录（含 `offered/chosen/prev_hash`） | `session.record_call` | 结果丢弃、run 置 `ABORTED` |
 | 7 | 交付结果（+ 停止通知） | 同上，之后 | 后续调用一律拒绝 |
 
-**为什么分两段而不是一段**：R5/R1 的价值在于"让这次调用不发生"，必须在转发之前；R4/R2/R3 要看到新证据才能判，只能在之后。`priority` 仍是全局有序（10/20 < 30/40/50），`attempted` 是两段按执行顺序拼接的日志——"为什么不是别的规则停的"要靠它回答。
+**为什么分两段而不是一段**：R5/R1/R6 的判定在转发之前就已成立，价值在于"让这次调用不发生"；R4/R2/R3 要看到新证据才能判，只能在之后。`priority` 仍是全局有序（10/20 < 30/35/40/50），`attempted` 是两段按执行顺序拼接的日志——"为什么不是别的规则停的"要靠它回答。
 
 **停止怎么传达给 Agent**：结果里追加一个 `[gateway] halt | state=… | rule=… | reason=…` 文本块（`gateway/wire.py`，全项目唯一被两侧共享的模块）。这是**礼貌**；真正的约束是**后续调用一律拒绝**。只靠通知的停止是 prompt，不是控制。
 
 **Agent 侧**（`agent/`，独立于网关的客户端）：`ReactivePolicy` 每一步都从**上一步的结果**推下一步，写完有用步骤后进入"再验一遍"阶段——它不知道什么时候该停。这不是缺陷，是 R4 要压缩的那段行为，也是指标的分母。换成真模型只需替换 `next_action`，循环、轨迹、规则都不用动。
 
-## 判据：从 R1 开始（D7），到 R2 收住打转（D8）
+## 判据：从"别再重复"到"做完了"（R1 → R4）
 
 同一条任务，同一套策略，只差网关里有没有装规则：
 
@@ -114,10 +117,13 @@ python -m gateway.trace verify traces/samples/demo-12-steps.jsonl
 baseline -- no rules installed
   ... 9 步 ...            stop: policy_exhausted
 governed -- rules installed
-  ... 5 步 ...            stop: halted   rule=R1  state=HALTED_DUPLICATE
-        reason=sqlite.query with identical arguments already ran at step 3
-steps: 9 -> 5  (saved 4)
+  ... 4 步 ...            stop: halted   rule=R4  state=HALTED_COMPLETE
+        reason=all 3 required evidence types obtained
+               (sql.rows.incidents, sql.rows.repos, sql.schema)
+steps: 9 -> 4  (saved 5)
 ```
+
+第 4 步是"星数查询回来了"的那一步——证据集恰好在这一刻齐了，于是网关收束，而不是等模型自己觉得够了。D7 时同一任务只能压到 5 步（R1 砍掉一次逐字重复），差的这一步就是 R4 的活。
 
 R1 只能砍"逐字重复"。换措辞、换排序、换工具再问一遍——答案一模一样，R1 看不见，那要 R2：
 
@@ -137,10 +143,12 @@ stop: max_turns after 11 steps
 | 规则 | priority | 阶段 | 命中后 | 为什么在这个位置 |
 |---|---|---|---|---|
 | R1 重复调用 | 20 | pre | `HALTED_DUPLICATE`，**回填上次结果** | 价值在于让这次调用不发生 |
+| R4 证据完备 | 30 | post | `HALTED_COMPLETE` | 唯一能说"做完了"的判据；必须早于 R2，否则"本可以早停"会被记成"打转" |
+| R6 证据不可得 | 35 | pre | `DEGRADED` | 不是"停不停"，是"停不了"；必须在第一次调用之前就判 |
 | R2 无进展 | 40 | post | `HALTED_NO_PROGRESS` | 要看到答案才能判"有没有学到"；兜底，不是压缩器 |
 | R3 预算耗尽 | 50 | post | `HALTED_BUDGET` | 最后一道保险；跑到这里说明任务没做完 |
 
-四件值得单独说的事：
+五个值得单独说的事：
 
 **重复不等于错误。** R1 命中后不返回错误，而是把上次的结果还给模型——数据本来就在上下文里，重发一遍比报错有用。可验证性没有因此打折：回填结果的 `result_digest` 与被重复那一步相等，所以"这是同一份数据"是**被证明**的，不是被声称的。
 
@@ -148,9 +156,52 @@ stop: max_turns after 11 steps
 
 **"无进展"里不能有问题。** `state_hash` 只合入**证据**和**答案摘要**，不合物 `(tool, args)`——把问题并进状态，状态就会随问题变化，"换个措辞再问一遍"在构造上永远不可能是"状态不变"，而这正是 R2 唯一要抓的东西。D8 用旧公式重算过那条 11 步基线：11 步 11 个不同状态，一次都触发不了（见 `docs/progress.md`）。
 
+**证据完备不是"回来了一些行"。** 第一版证据模型只看结果形状，t01 因此**在第 3 步就被判完成**——那一刻只读过 incidents，星数一个都没查。这是**误停**，比漏判贵得多。修法是把 `ev_type` 从"事实类型"升级成"事实类型 + 主体"，抽取条件变成三件事的合取：
+
+```
+tool ∈ producers            谁有资格生产这个事实（dirty.query 的假行集不算）
+args 命中参数谓词           问的是哪个问题（sql contains "from repos"）
+result 命中某个 shape       回来的是什么形状（{"rows": [...]}，空集也算）
+```
+
+发现它的不是证据模型自己，是**任务级 checker**——判据无法自证。所以验收句必须是"R4 触发**且** checker 通过"。
+
 **归一化是判据的前提，不是格式美化。** 参数里带 `request_id`、浮点尾差或键序不同，R1 就永远不会触发——而且不报错，只让所有数字静默归零。所以 `stop/normalize.py` 的每条规则都成对存在：丢掉噪声，**同时**保住语义。两条保守原则：volatile 键**按键名**判定（UUID 形状的值在 `id` 下就是"要查哪一行"），大小写折叠**按工具族声明**（SQLite 标识符不区分大小写，别的不一定）。误判一个重复的代价是停掉一个健康的 run 并在轨迹里留下一条错决策——比漏判贵得多。
 
 `--no-rules` 不是调试开关：D12 的对照表需要"没有网关时这条任务跑多少步"作分母，靠回滚 commit 生成的分母一定会过期。
+
+## 证据模型：`required ⊆ Evidence` 是怎么算出来的
+
+证据模型是**数据**（`config/evidence.json`），解释器是**代码**（`gateway/evidence.py`）。每个 `ev_type` 声明三样东西：
+
+```json
+"sql.rows.repos": {
+  "shapes": [["rows"]],
+  "producers": ["sqlite.query"],
+  "args": [{ "key": "sql", "op": "contains", "value": "from repos" }]
+}
+```
+
+抽取是 `(payload, tool, args) → {ev_type: 生产它的工具}` 的纯函数，因此重放成立。四条边界，每条都有正反用例：
+
+- **空行集算证据**："查过了、没有"是知识。若不算，t02 那条"这个 repo 不存在"的任务会被判成答案不完整，一路跑到轮数上限。
+- **错误结果不算**：`is_error` 是"没有答案"，不是"答案是没有"。
+- **截断的结果不算**：半个行集算证据就会得到假完成（`DESIGN` 2.6 坑 2）。所以顺序是**先判 `truncated` 再抽取**，不是反过来。
+- **别的上游的同样形状不算**：`producers` 是准入，不是装饰。
+
+轨迹里只存 `{ev_type: 工具}`，不存 payload——`seq` 已经说明"哪一步拿到的"，`evidence_added` 说明"这一步新增了什么"。UI 的证据进度条画的就是这两个字段，不需要另算。
+
+**R6（`DEGRADED`）用的是同一份声明**：某个必需 `ev_type` 的**所有** producer 都不在 `offered` 里，说明这个事实永远来不了。此时在**第一次调用之前**就收束，零上游调用：
+
+```
+degraded -- the tool that produces sql.rows.repos is not available
+   1. dirty.status      +-    still missing: sql.rows.repos
+  stop: halted after 1 steps   rule=R6  state=DEGRADED
+        reason=completion is impossible: sql.rows.repos cannot be obtained
+               (… only produced by sqlite.query; unavailable: sqlite.query)
+```
+
+`DEGRADED` 是终态而不是"降级后继续"：生产者是声明过的、可用工具集第一步就确定，继续跑只能为一个已成立的结论付钱。分类本身就是产出——指标表因此能把这条 run 从"停晚了"里剔除，而不是给它记一个 24 步的假超时。
 
 ## 工具面：归一化不是格式化，是"让工具可被调用"
 
@@ -198,7 +249,10 @@ gateway/
   session.py         RunSession：证据集 / 预算 / 调用历史 + 唯一写轨迹入口
   stop/controller.py 停止控制器：排序、短路、attempted 日志（**不含任何判据**）
   stop/normalize.py  参数归一化：调用身份的唯一定义处（A2.1）
+  evidence.py        证据模型：来源 + 参数谓词 + 结果形状 -> ev_type（纯函数）
   rules/duplicate.py R1 重复调用（pre，回填上次结果）
+  rules/evidence_complete.py R4 证据完备（post，唯一能说"做完了"的判据）
+  rules/unreachable.py R6 证据不可得（pre，DEGRADED，零上游调用）
   rules/no_progress.py R2 无进展（post，信息指纹连续两次不变）
   rules/budget.py    R3 预算耗尽（post，最后一道保险）
   wire.py            停止通知的线格式——网关与 agent 唯一共享的模块
@@ -213,13 +267,15 @@ gateway/
 agent/               客户端：policy（决策）/ loop（驱动）/ tasks（任务规格）
 mcp_servers/sqlite_server.py        只读 SQLite 上游（数据固定可复现）
 mcp_servers/dirty_schema_server.py  故意不合规的上游（$ref / oneOf / 非法名）
-tasks/01_unresolved_incidents.json  正常任务：目标 + 必需证据 + 轮数上限
-tasks/02_unanswerable_repo.json      对抗任务：库里没有的 repo，专门诱发"换个说法再问"
-config/gateway.json                 上游、trace 目录、模型标识
+tasks/t01_unresolved_incidents.json  正常任务：目标 + 必需证据 + 轮数上限
+tasks/t02_unanswerable_repo.json     对抗任务：库里没有的 repo，专门诱发"换个说法再问"
+config/gateway.json                 上游、trace 目录、证据模型路径
+config/evidence.json                冻结的证据模型（谁能生产、问什么、什么形状）
 config/schema-manifest.json         冻结的工具契约（入库，改上游后重跑冻结）
 scripts/echo_client.py              端到端驱动（固定调用表，D4 产物）
-scripts/agent_demo.py               D7：基线 vs 受控，同一任务两遍 + 10 项自检
+scripts/agent_demo.py               基线 vs 受控，同一任务两遍 + 10 项自检
 scripts/g2_demo.py                  G2：打转任务 11 步 -> 3 步 + 8 项自检
+scripts/evidence_demo.py            D9：R4 收束 + 答案检查 + DEGRADED + 12 项自检
 scripts/failclosed_demo.py          G1 的 S1/S2/S3
 scripts/tamper_demo.py              8 个篡改用例
 scripts/freeze_schema.py            冻结 / `--check` 检查 schema 漂移
@@ -244,6 +300,9 @@ docs/demo-g2.md                     G2 台词与录屏脚本
 ## 已知局限
 
 - 证据模型需按任务族手工建模，**不可泛化到开放任务**（`DESIGN` 假设 A2）
+- **证据证明"读过什么"，不证明"读对了什么"**：`sql.rows.incidents` 只看"问了 incidents 且回了行集"，一个写错 `where` 的查询同样满足它。R4 保证事实类型到齐，**对不对必须由任务级 checker 判**——所以验收句是"R4 触发**且** checker 通过"
+- **参数谓词是字符串包含，不是 SQL 解析**：`contains "from repos"` 会被 `from repos_backup` 命中。更严需要 SQL 解析器，那会让证据模型比它审的对象更难信任；保守方向就一条——宁可漏判（停在 `max_turns`，`missing` 有记录），不可误判（假完成）
+- **R6 看的是网关的准入决定，不是 agent 的意图**：生产者不在 `offered` 里就判 `DEGRADED`，这是确定的；但"agent 从来不去试那个工具"在网关眼里与健康 run 无异，只能等到轮数上限，此时靠轨迹里的 `missing` 看出来
 - 哈希链保证记录完整，**不保证上游结果真实**（需上游签名）
 - **链只能检出局部改动**：有写权限者可把改后记录的后续 `prev_hash`/`hash` 全部重算，链依然自洽；删掉尾部 N 行同样检不出。要封住这两个口子需外部锚定（链头签名、只追加日志、把末条 `hash` 打进 git tag）。`verify` 成功时会打印这条限制，不让"链完整"被读成"无遗漏"
 - **中途写失败的那次调用已经执行过了**：结果不会交给模型，但上游副作用无法回滚。所以只读工具可以放心重试，写操作需要上游侧幂等（`DESIGN` FR-17）

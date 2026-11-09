@@ -1,11 +1,16 @@
-"""D7/D8: the rules that need no evidence model.
+"""D7-D9: the rules, tested as pure functions of one frozen snapshot.
 
 These tests drive the rules directly with a hand-built ``StopContext``. That is
-deliberate: R1, R2 and R3 are pure functions of a frozen snapshot, and a test
-that needed a subprocess to see whether "the same call twice" is a duplicate
-would be testing the harness. The end-to-end hit rate is asserted separately in
+deliberate: every rule is a pure function of a snapshot, and a test that needed
+a subprocess to see whether "the same call twice" is a duplicate would be testing
+the harness. The end-to-end hit rate is asserted separately in
 ``test_agent_e2e.py``, because "unit tests pass" and "the rule ever fires in a
 real run" are different claims and the plan calls out exactly that gap.
+
+The completeness rule gets a disproportionate share of the cases below because
+it is the only one whose failure is *silent in the flattering direction*: a
+wrong subset test declares runs finished. The other rules fail by not firing,
+which the end-to-end tests catch.
 """
 
 from __future__ import annotations
@@ -17,8 +22,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from gateway.evidence import EvidenceModel, EvidenceType  # noqa: E402
 from gateway.limits import Budget, CallSignature  # noqa: E402
-from gateway.rules import BudgetExhausted, DuplicateCall, NoProgress  # noqa: E402
+from gateway.rules import (  # noqa: E402
+    BudgetExhausted,
+    DuplicateCall,
+    EvidenceComplete,
+    EvidenceUnreachable,
+    NoProgress,
+)
 from gateway.stop import POST, PRE, StopContext, StopController  # noqa: E402
 
 
@@ -34,6 +46,8 @@ def ctx(
     required=frozenset(),
     state_trail=(),
     state_hash=None,
+    available=frozenset(),
+    unreachable=frozenset(),
 ):
     return StopContext(
         run_id="run-test",
@@ -48,6 +62,8 @@ def ctx(
         wall_ms=wall_ms,
         state_trail=tuple(state_trail),
         state_hash=state_hash,
+        available=frozenset(available),
+        unreachable=frozenset(unreachable),
     )
 
 
@@ -188,6 +204,119 @@ class NoProgressTests(unittest.TestCase):
         self.assertIsNone(rule.check(ctx(state_hash="hA", state_trail=("hA",))))
         self.assertIsNone(rule.check(ctx(state_hash="hA", state_trail=("hX", "hA"))))
         self.assertIsNotNone(rule.check(ctx(state_hash="hA", state_trail=("hA", "hA"))))
+
+
+class EvidenceCompleteTests(unittest.TestCase):
+    rule = EvidenceComplete()
+
+    def test_declares_the_post_stage(self):
+        # Completeness is a statement about evidence, and the last piece of
+        # evidence is in the result. A pre-stage R4 could only read the plan.
+        self.assertEqual(self.rule.stage, POST)
+        self.assertEqual(self.rule.priority, 30)
+
+    def test_partial_evidence_is_not_a_verdict(self):
+        self.assertIsNone(
+            self.rule.check(
+                ctx(required={"a", "b"}, evidence={"a"})
+            )
+        )
+
+    def test_complete_evidence_halts_as_complete(self):
+        verdict = self.rule.check(ctx(required={"a", "b"}, evidence={"a", "b"}))
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict.state, "HALTED_COMPLETE")
+        self.assertEqual(verdict.decision, "halt_evidence_complete")
+        self.assertIn("a", verdict.reason)
+
+    def test_extra_evidence_is_not_a_problem(self):
+        # A run that learned more than asked is finished, not confused.
+        self.assertIsNotNone(
+            self.rule.check(ctx(required={"a"}, evidence={"a", "b", "c"}))
+        )
+
+    def test_an_empty_requirement_never_completes(self):
+        # ``set() <= anything`` is true, so a bare subset test would halt every
+        # evidence-free run on its first call -- including t02, whose purpose is
+        # to be stopped by R2. This is the difference between installed and
+        # correct.
+        self.assertIsNone(self.rule.check(ctx(required=set(), evidence=set())))
+        self.assertIsNone(self.rule.check(ctx(required=set(), evidence={"a"})))
+
+    def test_completeness_outranks_progress_and_budget(self):
+        # A run that finishes on its last call is a completion, not a budget
+        # failure: priority 30 < 40 < 50 is what makes the metric honest.
+        controller = StopController(
+            (BudgetExhausted(), NoProgress(), EvidenceComplete())
+        )
+        snapshot = ctx(
+            required={"a"},
+            evidence={"a"},
+            state_hash="hA",
+            state_trail=("hA",),
+            calls_used=3,
+            budget=Budget(max_calls=3, max_wall_ms=0),
+        )
+        post = controller.evaluate(POST, snapshot)
+        self.assertEqual(post.verdict.rule, "R4")
+        self.assertEqual(post.attempted, ("R4",), "R2 and R3 are never reached")
+
+
+class EvidenceUnreachableTests(unittest.TestCase):
+    def setUp(self):
+        self.model = EvidenceModel(
+            {
+                "sql.rows": EvidenceType(
+                    name="sql.rows",
+                    why="because",
+                    shapes=(("rows",),),
+                    producers=("sqlite.query", "backup.query"),
+                )
+            }
+        )
+        self.rule = EvidenceUnreachable(self.model)
+
+    def test_declares_the_pre_stage(self):
+        # The fact is known before the first call, so the call is refused rather
+        # than paid for -- zero upstream calls in a run that cannot finish.
+        self.assertEqual(self.rule.stage, PRE)
+        self.assertEqual(self.rule.priority, 35)
+
+    def test_a_reachable_fact_is_not_a_verdict(self):
+        self.assertIsNone(self.rule.check(ctx(required={"sql.rows"}, unreachable=set())))
+
+    def test_a_task_that_requires_nothing_is_not_degraded(self):
+        self.assertIsNone(self.rule.check(ctx(required=set(), unreachable=set())))
+
+    def test_an_unreachable_fact_degrades_the_run(self):
+        verdict = self.rule.check(
+            ctx(required={"sql.rows"}, unreachable={"sql.rows"}, available={"sqlite.status"})
+        )
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict.state, "DEGRADED")
+        self.assertEqual(verdict.decision, "halt_evidence_unreachable")
+        self.assertIn("sqlite.query", verdict.reason, "the reason names who could have produced it")
+        self.assertIn("backup.query", verdict.reason)
+
+    def test_the_reason_names_every_missing_fact(self):
+        verdict = self.rule.check(
+            ctx(required={"sql.rows"}, unreachable={"sql.rows"}, available=set())
+        )
+        self.assertIn("sql.rows", verdict.reason)
+
+    def test_degraded_outranks_progress(self):
+        # "Cannot finish" is a better diagnosis than "is spinning", and both can
+        # be true; priority 35 < 40 encodes it.
+        controller = StopController(
+            (NoProgress(), EvidenceUnreachable(self.model))
+        )
+        snapshot = ctx(
+            required={"sql.rows"},
+            unreachable={"sql.rows"},
+            state_hash="hA",
+            state_trail=("hA",),
+        )
+        self.assertEqual(controller.evaluate(PRE, snapshot).verdict.rule, "R6")
 
 
 class ControllerOrderTests(unittest.TestCase):

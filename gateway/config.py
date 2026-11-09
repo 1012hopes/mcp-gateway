@@ -53,6 +53,11 @@ class GatewayConfig:
     trace_dir: Path = REPO_ROOT / "traces" / "runs"
     model_id: str = "unlabeled-agent"
     schema_manifest: Path = REPO_ROOT / "config" / "schema-manifest.json"
+    #: The evidence model (D9). A path, not a model object: this file describes
+    #: *where the deployment keeps its facts*, and the gateway loads it once at
+    #: startup so a malformed model is a refusal to start, not a run that
+    #: silently never completes.
+    evidence_model: Path = REPO_ROOT / "config" / "evidence.json"
     upstreams: List[UpstreamSpec] = field(default_factory=list)
 
     @property
@@ -98,5 +103,6 @@ def load_config(path: Optional[str] = None) -> GatewayConfig:
         trace_dir=_path(gateway.get("trace_dir", "traces/runs")),
         model_id=gateway.get("model_id", "unlabeled-agent"),
         schema_manifest=_path(gateway.get("schema_manifest", "config/schema-manifest.json")),
+        evidence_model=_path(gateway.get("evidence_model", "config/evidence.json")),
         upstreams=specs,
     )

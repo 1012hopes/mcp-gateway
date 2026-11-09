@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List
@@ -59,8 +60,14 @@ def _print_steps(records: List[Dict[str, Any]]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="G2: the spin, stopped")
     parser.add_argument("--trace-dir", default=None)
-    parser.add_argument("--run-id", default="run-g2-demo")
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="prefix for the two trace files (default: unique, so a second run "
+        "cannot append to the first one's chain)",
+    )
     args = parser.parse_args(argv)
+    run_id = args.run_id or f"run-g2-demo-{uuid.uuid4().hex[:6]}"
 
     tasks = {task.id: task for task in load_tasks()}
     if TASK_ID not in tasks:
@@ -75,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print("baseline -- no rules installed")
     baseline = run_task_sync(
-        task, run_id=f"{args.run_id}-baseline", trace_dir=trace_dir, extra_args=["--no-rules"]
+        task, run_id=f"{run_id}-baseline", trace_dir=trace_dir, extra_args=["--no-rules"]
     )
     baseline_records = _load_records(baseline.trace_path)
     _print_steps(baseline_records)
@@ -83,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 78)
 
     print("governed -- rules installed")
-    governed = run_task_sync(task, run_id=f"{args.run_id}-governed", trace_dir=trace_dir)
+    governed = run_task_sync(task, run_id=f"{run_id}-governed", trace_dir=trace_dir)
     governed_records = _load_records(governed.trace_path)
     _print_steps(governed_records)
     print(f"  stop: {governed.stop_reason} after {governed.steps} steps")

@@ -19,10 +19,11 @@ gets called. Four consequences, in order of how easy they are to get wrong:
    returned; D14 will shrink it by gating and the field keeps its meaning.
 
 4. **The seven lifecycle steps are ordered, not merged.** Pre-stage guards (R5
-   safety, R1 duplicate) run before the upstream is touched; post-stage guards
-   (R4 completeness, R2 progress, R3 budget) run after, because they need the new
-   evidence. Swapping either pair does not raise -- it just makes the numbers
-   quietly wrong, which is why D6 wires the stages before any rule exists.
+   safety, R1 duplicate, R6 unreachable) run before the upstream is touched;
+   post-stage guards (R4 completeness, R2 progress, R3 budget) run after,
+   because they need the new evidence. Swapping either pair does not raise -- it
+   just makes the numbers quietly wrong, which is why D6 wired the stages before
+   any rule existed.
 
 Handlers are plain methods rather than closures so that the fail-closed path can
 be driven in-process by tests and by ``scripts/failclosed_demo.py`` without a
@@ -41,9 +42,10 @@ from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
 from .config import GatewayConfig
+from .evidence import EvidenceModel
 from .limits import CallSignature
 from .registry import Registry, ToolEntry, build_registry
-from .session import MAX_RESULT_BYTES, RunSession, digest_of, extract_evidence
+from .session import MAX_RESULT_BYTES, RunSession, digest_of
 from .stop import POST, PRE, StopContext, StopController, StopVerdict, merge_checks
 from .trace.sink import TraceChainError, TraceWriteError
 from .upstream import StdioUpstream, UpstreamFailure, tail_of_exception
@@ -91,6 +93,7 @@ class Gateway:
         session: RunSession,
         *,
         controller: Optional[StopController] = None,
+        evidence: Optional[EvidenceModel] = None,
         baseline: Optional[Mapping[str, str]] = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -98,6 +101,10 @@ class Gateway:
         self.upstreams = list(upstreams)
         self.session = session
         self.controller = controller or StopController(())
+        # No model means no fact can be claimed. That default is honest for a
+        # gateway built directly (tests, the fail-closed demo); ``__main__``
+        # always loads one, and refuses to start if it cannot.
+        self.evidence_model = evidence or EvidenceModel.empty()
         # The stamp in the trace must come from the rules *actually installed*,
         # not from a constant: a trace claiming rules-v0(none) while two rules
         # were running is worse than no stamp at all.
@@ -147,16 +154,39 @@ class Gateway:
         return types.ListToolsResult(tools=[entry.to_mcp() for entry in registry.offered])
 
     def stop_context(
-        self, tool: str, args_hash: str, *, state_hash: Optional[str] = None
+        self,
+        tool: str,
+        args_hash: str,
+        *,
+        available: Sequence[str],
+        state_hash: Optional[str] = None,
+        evidence: Optional[Mapping[str, str]] = None,
     ) -> StopContext:
-        """Snapshot the run for a rule. Built here so rules never see the session."""
+        """Snapshot the run for a rule. Built here so rules never see the session.
+
+        ``available`` is required rather than defaulted: a snapshot without the
+        tool surface cannot answer "can this fact ever arrive", and a default of
+        "nothing is available" would make every rule believe the run is
+        unrecoverable.
+
+        ``evidence`` is *merged* into the session's set, not substituted for it:
+        the post-stage rule has to see the fact this call produced, while the
+        session must not keep it until the record exists. Merging rather than
+        overriding is not a detail -- an override would hide every fact the run
+        already had, so a completeness rule would see ``missing`` grow on the very
+        call that completed it and never fire.
+        """
         session = self.session
+        offered = frozenset(available)
+        facts: Mapping[str, str] = session.evidence
+        if evidence:
+            facts = {**facts, **evidence}
         return StopContext(
             run_id=session.run_id,
             turn=session.turn,
             tool=tool,
             args_hash=args_hash,
-            evidence=frozenset(session.evidence),
+            evidence=frozenset(facts),
             required=frozenset(session.required),
             history=tuple(session.history),
             budget=session.budget,
@@ -167,6 +197,10 @@ class Gateway:
             wall_ms=session.wall_ms(),
             state_trail=tuple(session.state_trail),
             state_hash=state_hash,
+            available=offered,
+            # Computed here, from one definition, so R4 and R6 cannot disagree
+            # about which facts are still obtainable.
+            unreachable=frozenset(self.evidence_model.unavailable(session.required, offered)),
         )
 
     def _refuse(self, session: RunSession) -> types.CallToolResult:
@@ -202,7 +236,19 @@ class Gateway:
         attempted: List[str] = []
         verdict: Optional[StopVerdict] = None
         evidence_added: List[str] = []
+        #: Facts this call produced but has not committed yet. Held here, not in
+        #: the session, for the same reason as ``committed`` below: if the record
+        #: cannot be written, the result is dropped and the run is aborted, and
+        #: the session must not be left claiming a fact the trace cannot prove.
+        pending_evidence: Dict[str, str] = {}
         keep_result = True
+        truncated = False
+        #: Whether the halt notice is *already* the response. A blocked call has
+        #: nothing else to say, so the notice is its result; a forwarded or
+        #: replayed one carries data and gets the notice appended. A boolean
+        #: here beats inferring it from the state name: DEGRADED is terminal but
+        #: is not a "HALTED_" state, and the replay path keeps its result.
+        notice_in_result = False
         #: Fingerprint of what the run knows at this point. Updated to the
         #: provisional *after* state once the result exists, and only absorbed by
         #: the session once the record has landed -- the session must never claim
@@ -211,7 +257,9 @@ class Gateway:
         committed: Optional[str] = None
 
         # -- steps 2-3: pre-stage guards ----------------------------------
-        pre = self.controller.evaluate(PRE, self.stop_context(chosen, signature.args_hash))
+        pre = self.controller.evaluate(
+            PRE, self.stop_context(chosen, signature.args_hash, available=offered)
+        )
         attempted.extend(pre.attempted)
 
         if pre.verdict is not None:
@@ -239,6 +287,7 @@ class Gateway:
                         reason=verdict.reason,
                     )
                 )
+                notice_in_result = True
                 payload = {"blocked": verdict.reason}
         else:
             response, payload, forwarded_decision = await self._forward(
@@ -247,16 +296,33 @@ class Gateway:
             decision = forwarded_decision
 
             # -- steps 5-6: evidence, then post-stage guards ---------------
-            evidence_added = session.add_evidence(extract_evidence(payload))
+            # Truncation is decided *before* extraction, not after. A payload
+            # cut in half is not a complete fact, and a half-returned row set
+            # that counted as evidence would halt the run on a false completion
+            # (DESIGN 2.6 pitfall 2). Computing the flag later would leave the
+            # extractor reading a partial body as if it were whole.
+            truncated = len(repr(payload)) > MAX_RESULT_BYTES
+            pending_evidence = self.evidence_model.extract(
+                payload, tool=chosen, args=args, truncated=truncated
+            )
+            evidence_added = sorted(
+                name for name in pending_evidence if name not in session.evidence
+            )
             # The digest is computed once, before the write, because R2 has to
             # judge *this* result and the record that will hold it must agree:
             # a provisional hash that the trace then contradicts would make the
             # plateau unreadable exactly where it matters.
             committed = digest_of(payload)
-            state_hash = session.state_hash(committed)
+            state_hash = session.state_hash(committed, evidence=pending_evidence)
             post = self.controller.evaluate(
                 POST,
-                self.stop_context(chosen, signature.args_hash, state_hash=state_hash),
+                self.stop_context(
+                    chosen,
+                    signature.args_hash,
+                    available=offered,
+                    state_hash=state_hash,
+                    evidence=pending_evidence,
+                ),
             )
             attempted.extend(post.attempted)
             if post.verdict is not None:
@@ -265,12 +331,13 @@ class Gateway:
                 session.halt(verdict.state, rule=verdict.rule, reason=verdict.reason)
 
         latency_ms = int((self._clock() - started) * 1000)
-        truncated = len(repr(payload)) > MAX_RESULT_BYTES
+        # The record describes the run *including* this call, so it reports the
+        # merged view. The session still holds only what earlier records prove.
         check = merge_checks(
             verdict=verdict,
             attempted=attempted,
-            evidence=session.evidence,
-            missing=session.missing,
+            evidence={**session.evidence, **pending_evidence},
+            missing=session.missing_with(*pending_evidence),
             state_hash=state_hash,
         )
 
@@ -296,11 +363,14 @@ class Gateway:
                 "(fail-closed)"
             )
 
+        # Only now may the session keep what this call taught it: the fact and
+        # the digest both become real when -- and only when -- the record that
+        # proves them exists.
+        session.add_evidence(pending_evidence)
         if committed is not None:
-            # Only now: the state may claim this result only once the record that
-            # proves it exists. A blocked call never reaches here -- it taught the
-            # run nothing and R1's replay hands back an earlier result whose
-            # digest is already absorbed.
+            # A blocked call never reaches here -- it taught the run nothing and
+            # R1's replay hands back an earlier result whose digest is already
+            # absorbed.
             session.commit_result(committed)
 
         if keep_result:
@@ -311,7 +381,7 @@ class Gateway:
             self._remember(signature, response)
 
         # -- step 7b: deliver, with the halt notice attached ----------------
-        if session.halted and verdict is not None:
+        if verdict is not None and not notice_in_result:
             # Appended *after* the digest: the notice is gateway metadata, not
             # upstream data. Digesting it would make the same upstream answer
             # hash differently depending on the gateway's decision.

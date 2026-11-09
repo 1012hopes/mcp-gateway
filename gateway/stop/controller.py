@@ -19,15 +19,17 @@ What the controller does own:
 Why two stages instead of one ordered list
 ------------------------------------------
 Safety (R5) and duplicate (R1) guards must run *before* the call is forwarded --
-their whole value is preventing it. Completeness (R4), progress (R2) and budget
-(R3) can only be judged *after*, because they need the new evidence. So a rule
-declares ``stage`` and the controller only runs the rules that are meaningful
-there. The global priority order is preserved (10/20 before 30/40/50), and
-``attempted`` stays a faithful execution log by concatenation.
+their whole value is preventing it. So must R6, whose fact ("no available tool
+can produce this") is known before the first call. Completeness (R4), progress
+(R2) and budget (R3) can only be judged *after*, because they need the new
+evidence. So a rule declares ``stage`` and the controller only runs the rules
+that are meaningful there. The global priority order is preserved (10/20/35
+before 30/40/50), and ``attempted`` stays a faithful execution log by
+concatenation.
 
-At D6 the rule tuple is empty: the socket is wired, no devices are plugged in.
-Every trace says ``rules-v0(none)``, which is worth writing precisely because
-there is nothing else to say.
+At D6 the rule tuple was empty: the socket wired, no devices plugged in. Every
+trace said ``rules-v0(none)``, which was worth writing precisely because there
+was nothing else to say.
 """
 
 from __future__ import annotations
@@ -80,6 +82,13 @@ class StopContext:
     #: Fingerprint *after* this call's result (post-stage only). ``None`` before
     #: the result exists -- R2 cannot judge a call it has not seen the answer to.
     state_hash: Optional[str] = None
+    #: Namespaced tools the agent may call right now. Frozen and unknown tools
+    #: are already absent -- that is the admission decision, not a guess.
+    available: FrozenSet[str] = frozenset()
+    #: Required evidence types no available tool is allowed to produce (D9).
+    #: Computed by the transport from the evidence model, so a rule cannot
+    #: disagree with itself about what "unreachable" means.
+    unreachable: FrozenSet[str] = frozenset()
 
     @property
     def missing(self) -> FrozenSet[str]:

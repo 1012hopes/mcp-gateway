@@ -27,8 +27,15 @@ from typing import List, Optional
 import anyio
 
 from .config import GatewayConfig, load_config, repo_root
+from .evidence import EvidenceModel, load_evidence_model
 from .registry import RegistryError, load_baseline
-from .rules import BudgetExhausted, DuplicateCall, NoProgress
+from .rules import (
+    BudgetExhausted,
+    DuplicateCall,
+    EvidenceComplete,
+    EvidenceUnreachable,
+    NoProgress,
+)
 from .session import Budget, RunSession, new_run_id, new_session_id
 from .stop import StopController
 from .trace.sink import JsonlSink, TraceChainError, TraceWriteError
@@ -61,7 +68,8 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="EV_TYPE",
-        help="evidence type this task needs; repeatable (D9 loads these from config)",
+        help="evidence type this task needs; repeatable. An undeclared type "
+        "refuses to start rather than degrading the run (see evidence.json)",
     )
     parser.add_argument("--max-calls", type=int, default=24)
     parser.add_argument("--max-wall-ms", type=int, default=600_000)
@@ -73,7 +81,9 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_controller(*, enabled: bool = True) -> StopController:
+def build_controller(
+    evidence: EvidenceModel, *, enabled: bool = True
+) -> StopController:
     """The single assembly point for stop criteria (DESIGN 2.2).
 
     One entry per rule -- no registry object, no import side effects. A rule set
@@ -86,7 +96,15 @@ def build_controller(*, enabled: bool = True) -> StopController:
     """
     if not enabled:
         return StopController(())
-    return StopController((DuplicateCall(), NoProgress(), BudgetExhausted()))
+    return StopController(
+        (
+            DuplicateCall(),                 # 20  pre   same call again
+            EvidenceComplete(),              # 30  post  the task is done
+            EvidenceUnreachable(evidence),   # 35  pre   it can never be done
+            NoProgress(),                    # 40  post  learning nothing
+            BudgetExhausted(),               # 50  post  out of room
+        )
+    )
 
 
 def prepare(config: GatewayConfig, args: argparse.Namespace) -> RunSession:
@@ -125,6 +143,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         _log(f"config error: {exc}")
         return EXIT_USAGE
 
+    # The evidence model is loaded before the sink is opened. A run whose
+    # required facts cannot even be named must not leave a trace file behind:
+    # the file would say "a run happened here" about a run that never could.
+    try:
+        evidence = load_evidence_model(config.evidence_model)
+    except (OSError, ValueError) as exc:
+        _log(f"evidence model error ({config.evidence_model}): {exc}")
+        return EXIT_USAGE
+
+    # A typo in --require is a refuse-to-start, not a degraded run. Treating it
+    # as "unreachable evidence" would let every task silently end DEGRADED at
+    # step 1, which is the failure mode of a gateway that half-works (DESIGN
+    # 2.6 pitfall 4: refusing to start beats starting wrongly).
+    unknown = sorted(set(args.require or ()) - set(evidence.types))
+    if unknown:
+        _log(
+            f"unknown evidence type(s): {', '.join(unknown)}; "
+            f"declared in {config.evidence_model}: {', '.join(evidence.types)}"
+        )
+        return EXIT_USAGE
+
     try:
         session = prepare(config, args)
     except TraceChainError as exc:
@@ -158,7 +197,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         gateway = Gateway(
-            config, upstreams, session, controller=build_controller(enabled=not args.no_rules), baseline=baseline
+            config,
+            upstreams,
+            session,
+            controller=build_controller(evidence, enabled=not args.no_rules),
+            evidence=evidence,
+            baseline=baseline,
         )
     except ValueError as exc:
         _log(f"config error: {exc}")
@@ -166,6 +210,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     _log(f"gateway {session.gateway_version} | run={session.run_id} | {session.trace_path}")
     _log(f"upstreams: {', '.join(u.name for u in upstreams)} | rules={session.rules_version}")
+    _log(
+        f"evidence: {evidence.version} ({', '.join(evidence.types)}) | "
+        f"required: {', '.join(sorted(session.required)) or '(none)'}"
+    )
     _log(
         "schema baseline: "
         + ("frozen, drift will freeze tools" if baseline is not None else "absent (no drift check)")

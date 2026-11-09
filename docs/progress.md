@@ -11,6 +11,7 @@
 | D6（11-09） | 完成 | `stop/controller.py`（排序 / 短路 / `attempted`，零规则）+ 七步生命周期 + `agent/`（闭环策略 + 循环）；一条真实任务 9 步、9 条记录、`verify` OK；182 tests | D7：参数归一化 + R1 + R3 |
 | D7（11-09） | 完成 | `stop/normalize.py` + `rules/duplicate.py` + `rules/budget.py`；同一任务 **9 步 → 5 步**：R1 在第 5 步命中并回填第 3 步的结果（`result_digest` 相等）；`--max-calls 3` 的 run 由 R3 在第 3 步收束；241 tests | D8：R2 无进展 + 规则注册表完整化 |
 | D8（11-09） | 完成 | `rules/no_progress.py` + `stop_check.state_hash`（schema v1→v2）+ 对抗任务 `t02`；**G2：11 步 → 3 步**，R2 在第二个相同答案处收束，基线 11 步全程无逐字重复（证明不是 R1 抓的）；271 tests | D9：证据模型 + R4 + DEGRADED |
+| D9（11-09） | 完成 | `gateway/evidence.py` + `config/evidence.json` + `rules/evidence_complete.py`（R4）+ `rules/unreachable.py`（R6，`DEGRADED`）；t01 **9 步 → 4 步**，R4 在最后一项证据到达处收束，checker 独立复核交付结果；缺生产者的配置 **1 步**收束、零上游调用；331 tests | D10：run 边界 + 脱敏顺序 + 串行化 |
 
 ## D1 完成判据核对
 
@@ -195,3 +196,38 @@ old formula: steps where it would see an unchanged state: none
 14. **`schema_version` v1 → v2（计划里没有）。** 计划把 schema 演进当成 D10 之后的事，但 R2 的判据要能被复看就必须写进记录。D1 定的规则是"新增字段前先升版本"，照做，并把三个坑写进 `DESIGN` 2.3。
 15. **新增对抗任务 `t02` + `futile_search` 策略（任务集本该在 D11）。** G2 的判据需要一条"必然打转"的任务，D11 才建任务集；但没有它 D8 的 gate 无法验收，所以在 D11 之前先建一条。D11 扩到 20 条时只加文件，不改代码。
 16. **`scripts/make_sample.py` 的样例轨迹升到 v2 重新生成。** 它不带 `state_hash`——那样例建模的是"没有装规则的 run"，没人算过指纹，缺省即不出现，正好演示 v2 的可选键语义。
+
+## D9 完成判据核对
+
+| 判据（`PLAN.md`） | 结果 |
+|---|---|
+| `required ⊆ Evidence` 触发 | `scripts/evidence_demo.py`：t01 **9 步 → 4 步**，R4 在第 4 步（`evidence_added = ["sql.rows.repos"]`，`missing = []`）收束；12 项自检全 PASS |
+| 该任务 checker 通过 | demo 里的 `check_t01_answer()` 独立于证据模型复核交付结果：2 条未解决 incident（id 2 / 4 + severity）+ 两条 repo 的星数（`maximhq/bifrost`=9100、`1012hopes/mcp-gateway`=1） |
+| 证据被策略拒绝时进入 `DEGRADED` 而非跑满预算 | `DegradedRun`：只挂 stub 上游、`required = sql.rows.repos`，R6 在 **pre 阶段**收束——**1 步、零上游调用**，`state=DEGRADED`，reason 指名 `sqlite.query` 不可用 |
+| 空结果仍算证据（t02 依赖） | `test_evidence.py::test_an_empty_row_set_is_evidence`；t02 的 11→3 未被 D9 改变（`SpinGovernedRun` 断言） |
+
+## D9 的七个发现
+
+**1. 只按结果形状抽取，会让 R4 在第 3 步给出一次假完成。** 计划的 `required = {sql.schema, sql.rows}` 在 t01 上第 3 步就满足了——那一刻只读过 incidents，星数一个都没查。判据没错、抽取也没错，错在"有些行回来了"被当成"任务要的那几行回来了"。这就是**误停**，是这套判据唯一可能造成的、比漏判更贵的伤害。修法是把 `ev_type` 从"事实类型"升级为"事实类型 + 主体"（`sql.rows.incidents` / `sql.rows.repos`），并在抽取器上加参数谓词（`args.sql contains "from repos"`）。
+
+发现它的不是证据模型自己，是**任务级 checker**——判据无法自证。这也是为什么验收句必须是"R4 触发**且** checker 通过"，而不是"R4 触发"。
+
+**2. 抽取必须按来源准入，不能只看形状。** `dirty.query` 返回的也是 `{"rows":[...],"row_count":1}`。不加 `producers` 门，一个 stub server 的假行集就能满足关于真库的任务。加了之后，`producers` 同时承担第二个用途：**可用性判定**（R6），于是"谁能生产"只有一个定义。
+
+**3. 截断判定与证据抽取的先后反了（D8 遗留）。** `truncated` 原本在抽取**之后**计算，等于让抽取器读半个 body；而"半个行集算证据"恰好会得到一次假完成（`DESIGN` 2.6 坑 2 早就写了这条，代码里顺序是错的）。已改为先判截断再抽取，`truncated=True` 时抽取器返回空。
+
+**4. `DEGRADED` 从"继续"改成"终态"是必要的，不是偷懒。** 生产者声明在配置里、可用工具集在第一次 `list_tools` 后就确定，所以"这个事实永远来不了"在第一步就是已知的。继续跑只能为一个已经成立的结论付钱，而且会把这条 run 记成 `HALTED_BUDGET`——指标表里就成了"agent 很慢"，而真实原因是"server 没部署"。分类本身就是产出。R6 因此放在 **pre** 阶段：连那一次调用都不让它发生。
+
+**5. `StopContext` 加字段时，默认值决定了规则的可用性。** `available` / `unreachable` 都给了 `frozenset()` 默认值，所以 D6–D8 的所有既有测试一处没改就继续跑。上一个版本（`state_hash`）的经验在这里复用：**新字段先做成"缺省即无信息"，再让唯一的生产者去填**，否则每加一个规则就要动一遍所有构造点。
+
+**6. 停止通知的追加条件从 `session.halted` 换成了 `notice_in_result`。** `DEGRADED` 是终态但不是 `HALTED_*`，用 `halted` 判断会让降级的 run 拿不到通知；而 pre 阶段被拦下的调用本来就把通知**当结果**返回，再用 `halted` 判断会追加第二次。两个 bug 方向相反，用同一个布尔量表达才不会再错。
+
+**7. 证据原本在写盘之前就进了 session——这是自己给规则打脸。** 项目的立身之本是"session 不能声称知道轨迹证明不了的东西"，`result_digest` 为此做了两阶段提交；但证据集是直接 `add_evidence()` 的。写失败时 run 会中止，而 `stats()["evidence"]` 会报告一组**没有任何记录证明**的事实。修法是把两阶段提交扩展到证据：抽取结果先留在 transport 的 `pending_evidence` 里，判定用合并视图，落盘成功才提交。
+
+修的过程中踩到了同一类错的第二个面：`stop_context(evidence=...)` 最初被实现成**替换**而非合并。于是第 4 步 POST 阶段规则看到的证据集只有 `{sql.rows.repos}`，`sql.schema` 和 `sql.rows.incidents` 全丢，`missing` 反而从 1 项变成 2 项——R4 在**完成的那一步**恰好不发火，run 继续跑到第 5 步被 R1 抓住。**四个测试同时红，但报的是 `'R1' != 'R4'` 和 `5 != 4`，没有一个指向 `stop_context`。** 这类 bug 的共性是：不抛错、类型对、字段在，只有结论是假的——和 `tamper_demo` 那次"改了但字节没变"是同一族。已写进 `DESIGN` A3，因为它是 A3 的约束而不是 A3 的实现细节。
+
+## D9 追加的三条偏差
+
+17. **`StopContext` 新增 `available` / `unreachable`（计划里没有）。** 原计划让 R4 直接读证据集就够；但"证据不可得"需要知道**可用工具面**，而规则不该去摸注册表。改为 transport 用证据模型算一次，规则只读快照——和 `state_hash` 的处理方式一致。
+18. **`--require` 写错类型 → 拒绝启动（exit 2），不是降级。** 计划没写这条。若把未知类型当成"不可得"，每个任务都会在第 1 步 `DEGRADED`，而那种失败看起来像正常运行——正是 `DESIGN` 2.6 坑 4 说的"半可用的网关比拒绝启动更危险"。
+19. **三个 demo 的 `--run-id` 默认值改成随机。** 反复跑同一个 demo 时，`JsonlSink` 会**续写**已有链：文件仍然 verify 通过，但里面是两次 run 的记录，断言会莫名其妙地失败。默认唯一、显式指定即自负其责。

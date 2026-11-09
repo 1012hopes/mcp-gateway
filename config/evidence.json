@@ -1,0 +1,22 @@
+{
+  "version": "evidence-v1",
+  "types": {
+    "sql.schema": {
+      "why": "The structure of the database was read: which tables exist, or which columns one has. Structure, not contents -- a run that only lists tables has not answered a question about the data.",
+      "shapes": [["tables"], ["table", "columns"]],
+      "producers": ["sqlite.list_tables", "sqlite.describe_table"]
+    },
+    "sql.rows.incidents": {
+      "why": "The incident rows were read. An empty row set still counts: asking and finding nothing is knowledge, and requiring non-empty rows would let t02 burn its whole budget on a question whose answer is 'not there'.",
+      "shapes": [["rows"]],
+      "producers": ["sqlite.query"],
+      "args": [{ "key": "sql", "op": "contains", "value": "from incidents" }]
+    },
+    "sql.rows.repos": {
+      "why": "The repo rows were read -- a different fact from the incident rows even though both arrive as {\"rows\": [...]}. Shape alone cannot tell them apart, which is why the argument predicate exists.",
+      "shapes": [["rows"]],
+      "producers": ["sqlite.query"],
+      "args": [{ "key": "sql", "op": "contains", "value": "from repos" }]
+    }
+  }
+}

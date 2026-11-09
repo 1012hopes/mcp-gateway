@@ -29,8 +29,12 @@ Two things this class deliberately does *not* do:
 
 * **It does not decide.** ``halt()`` is called by the transport after a rule
   fired; the ordering, the criteria and the "why" live in ``gateway/stop/``.
-* **It does not extract evidence.** ``extract_evidence`` is the D9 seam; until
-  then it returns nothing and every record honestly says ``evidence_added: []``.
+* **It does not extract evidence.** That is ``gateway/evidence.py`` (D9): the
+  session only *merges* what the model returns, so there is exactly one place
+  where "what counts as a fact" is defined and exactly one place where the set
+  grows. Until D9 it merged nothing, and every record honestly said
+  ``evidence_added: []`` -- the placeholder was deliberately not faked, because
+  a rule that looks alive before it is, is this project's whole subject.
 """
 
 from __future__ import annotations
@@ -54,7 +58,6 @@ __all__ = [
     "RunSession",
     "TERMINAL_STATES",
     "digest_of",
-    "extract_evidence",
     "new_run_id",
     "new_session_id",
 ]
@@ -65,11 +68,19 @@ __all__ = [
 #: reads as "evidence present" and the run halts early (DESIGN 2.6 pitfall 2).
 MAX_RESULT_BYTES = 1_000_000
 
-#: States from which no further call may be served. ``DEGRADED`` is absent on
-#: purpose: a degraded run continues, it just records what it could not get.
+#: States from which no further call may be served.
+#:
+#: ``DEGRADED`` is terminal (D9), which is a change from DESIGN's first draft
+#: ("degrade, then keep going"). Continuing buys nothing: if every declared
+#: producer of a required fact is unavailable, completion is impossible, so the
+#: remaining calls can only burn budget to reach a conclusion already known.
+#: The classification is the point -- ``DEGRADED`` is neither a completion nor a
+#: budget failure, so a metrics table can exclude it from "stopped too late"
+#: instead of counting a structurally impossible task as a slow one.
 TERMINAL_STATES = frozenset(
     {
         "ABORTED",
+        "DEGRADED",
         "HALTED_COMPLETE",
         "HALTED_DUPLICATE",
         "HALTED_NO_PROGRESS",
@@ -90,16 +101,6 @@ def new_run_id() -> str:
 
 def new_session_id() -> str:
     return f"sess-{uuid.uuid4().hex[:8]}"
-
-
-def extract_evidence(payload: Any) -> Dict[str, str]:
-    """``result payload -> {ev_type: source}``. Placeholder until D9.
-
-    Returning an empty dict is the honest D6 state: no extractor is registered,
-    so no record may claim evidence. A fake extractor here would make R4 look
-    alive before it is, which is the failure mode this project is about.
-    """
-    return {}
 
 
 @dataclass
@@ -150,12 +151,14 @@ class RunSession:
         return self.state == "ABORTED"
 
     @property
-    def halted(self) -> bool:
-        return self.state.startswith("HALTED_") or self.state == "WAITING_APPROVAL"
-
-    @property
     def closed(self) -> bool:
-        """No further call may be served. True for aborted *and* halted runs."""
+        """No further call may be served. True for aborted *and* halted runs.
+
+        There is no separate ``halted`` property (D9 removed it): once DEGRADED
+        became terminal, "was this run stopped by a rule" stopped being a
+        different question from "may it still be called", and a property returning
+        False for a degraded run would be a trap rather than an API.
+        """
         return self.state in TERMINAL_STATES
 
     @property
@@ -165,7 +168,16 @@ class RunSession:
 
     @property
     def missing(self) -> List[str]:
-        return sorted(self.required - set(self.evidence))
+        return self.missing_with()
+
+    def missing_with(self, *pending: str) -> List[str]:
+        """``required ⁻ (evidence ∪ pending)`` -- for a call not yet committed.
+
+        Needed because the post-stage rule must judge the call *before* its
+        record exists: the verdict has to see the fact, while the session must
+        not claim it until the trace can prove it.
+        """
+        return sorted(self.required - set(self.evidence) - set(pending))
 
     def wall_ms(self) -> int:
         if self.started_at is None:
@@ -235,7 +247,9 @@ class RunSession:
 
     # -- R2's information state -------------------------------------------
 
-    def state_hash(self, *pending: str) -> str:
+    def state_hash(
+        self, *pending: str, evidence: Optional[Mapping[str, str]] = None
+    ) -> str:
         """Fingerprint of what the run *knows*: evidence plus result digests.
 
         Deliberately not ``(tool, args_hash)`` (DESIGN's first draft): folding
@@ -246,14 +260,19 @@ class RunSession:
         already catches one stage earlier.
 
         Both inputs are sets that only ever grow, so this value changes **iff**
-        the run learned something. ``pending`` is for a result that has not been
-        committed yet: the post-stage guard must judge the call *before* the
-        record is written, and a digest absorbed before the write would leave
-        the session claiming knowledge the trace does not have.
+        the run learned something. ``pending`` and ``evidence`` are the same idea
+        for the two halves: the post-stage guard must judge a call *before* its
+        record exists, and anything absorbed before the write would leave the
+        session claiming knowledge the trace does not have. So neither the fact
+        nor its digest is merged here -- both are passed in, and both are only
+        kept by the caller once the record has landed.
         """
         results = set(self.result_digests)
         results.update(pending)
-        return digest_of({"evidence": sorted(self.evidence), "results": sorted(results)})
+        facts = set(self.evidence)
+        if evidence:
+            facts.update(evidence)
+        return digest_of({"evidence": sorted(facts), "results": sorted(results)})
 
     def commit_result(self, digest: str) -> None:
         """Absorb a delivered result. Called only after its record landed."""

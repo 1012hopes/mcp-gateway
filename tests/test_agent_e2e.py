@@ -1,4 +1,4 @@
-"""D7/D8 acceptance: every rule that is installed must fire in a real run.
+"""D7-D9 acceptance: every rule that is installed must fire in a real run.
 
 The plan's warning for this stage is specific: a rule that never fires raises
 nothing, prints nothing, and turns every number downstream into zero. So the
@@ -6,21 +6,30 @@ assertions here are not "the rule is correct" (``test_rules.py`` covers that wit
 a hand-built context) but **the hit rate is greater than zero, in a subprocess,
 with the real upstream**.
 
-Five runs, five claims:
+Seven runs, seven claims:
 
 * ``BaselineRun`` -- t01 with ``--no-rules``. Nine steps, and it ends because the
   policy ran out of ideas. This is the denominator the compression numbers need,
   and it must stay reproducible after the rules exist.
-* ``GovernedRun`` -- t01, five steps, halted by R1 on a call the baseline makes
-  twice. The duplicate is still *visible* in the trace (the refusal is
-  recorded), which is what makes "it was caught here" checkable afterwards.
+* ``CompleteRun`` -- t01, four steps, halted by **R4** at the exact call where
+  the last required fact arrived. The delivered result is checked against the
+  task, because "required ⊆ evidence" is only worth anything if the evidence
+  actually answers the question (the D9 acceptance criterion).
 * ``BudgetRun`` -- t01 with ``--max-calls 3``: R3 halts on the third call, and
   that call's result is still delivered, because it was paid for.
+* ``DuplicateRun`` -- t01 driven by a scripted policy that repeats its first
+  call: R1 refuses it before the upstream sees it and replays the earlier
+  result. Scripted rather than reactive because R4 now ends the reactive run
+  before any duplicate can occur -- a task that tests one rule must not
+  accidentally test another.
 * ``SpinBaselineRun`` -- t02 with ``--no-rules``: eleven calls, no two alike, and
   the same empty answer every time. This is the G2 adversary.
 * ``SpinGovernedRun`` -- t02 with the rules: three steps, R2 halts on the second
   identical answer, and the plateau is visible as two adjacent equal
   ``state_hash`` values in the file.
+* ``DegradedRun`` -- t01 against a configuration where the only upstream that can
+  produce ``sql.rows.repos`` is absent: one step, ``DEGRADED``, and R6 explains
+  which producer is missing instead of letting the run burn its budget.
 """
 
 from __future__ import annotations
@@ -30,7 +39,9 @@ import sys
 import tempfile
 import unittest
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
+from typing import Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -44,6 +55,7 @@ except ImportError:  # pragma: no cover
 
 if HAS_MCP:
     from agent import load_tasks, run_task_sync
+    from agent.policy import Action, ScriptedPolicy
 
 
 def _records(path: Path) -> list:
@@ -58,11 +70,12 @@ class _RunMixin:
     """Spawn one run per class; each subclass asserts a different ending.
 
     A mixin rather than a ``TestCase`` subclass: unittest would collect the base
-    class too and spawn a fourth run to assert the same five things a third time.
+    class too and spawn a run to assert the same five things an extra time.
     """
 
     extra_args: tuple = ()
     task_id: str = "t01"
+    policy: Optional[object] = None
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -70,6 +83,7 @@ class _RunMixin:
         tasks = {task.id: task for task in load_tasks()}
         cls.result = run_task_sync(
             tasks[cls.task_id],
+            policy=cls.policy,
             run_id=cls.__name__.lower(),
             trace_dir=Path(cls._tmp.name),
             extra_args=list(cls.extra_args),
@@ -135,55 +149,63 @@ class BaselineRun(_RunMixin, unittest.TestCase):
             self.assertEqual(record["stop_check"]["attempted"], [])
             self.assertFalse(record["stop_check"]["hit"])
 
+    def test_the_baseline_still_tracks_evidence(self):
+        # The evidence model runs whether or not rules do -- what the baseline
+        # lacks is anything acting on it. That separation is what lets a
+        # comparison table say "same knowledge, more steps" instead of
+        # attributing the compression to a different extraction.
+        self.assertEqual(self.records[-1]["stop_check"]["missing"], [])
+        for record in self.records:
+            self.assertEqual(record["stop_check"]["attempted"], [])
+
 
 @unittest.skipUnless(HAS_MCP, "mcp SDK not installed (run inside .venv)")
-class GovernedRun(_RunMixin, unittest.TestCase):
-    """R1 installed: the duplicate is refused before it reaches the upstream."""
+class CompleteRun(_RunMixin, unittest.TestCase):
+    """R4 installed: the run stops where the task is finished, not where it gave up."""
 
-    def test_r1_fires_and_ends_the_run(self):
+    def test_r4_fires_and_ends_the_run(self):
         self.assertEqual(self.result.stop_reason, "halted")
-        self.assertEqual(self.result.halt["rule"], "R1")
-        self.assertEqual(self.result.halt["state"], "HALTED_DUPLICATE")
+        self.assertEqual(self.result.halt["rule"], "R4")
+        self.assertEqual(self.result.halt["state"], "HALTED_COMPLETE")
+        self.assertEqual(self.result.halt["decision"], "halt_evidence_complete")
 
-    def test_steps_drop_from_nine_to_five(self):
-        # Four useful calls plus the attempt that got caught. Not a compression
-        # yet -- G2 in D8 is where the number is claimed -- but the run stops
-        # earlier without losing evidence.
-        self.assertEqual(self.result.steps, 5)
+    def test_nine_steps_become_four(self):
+        # Nine without the gateway; four is the shortest run that can finish:
+        # schema, incidents, repo stars -- the describe_table call is the only
+        # one that adds nothing, and it is the agent's plan, not the gateway's.
+        self.assertEqual(self.result.steps, 4)
 
-    def test_the_duplicate_is_recorded_as_refused(self):
-        counts = Counter((r["chosen"], r["args_hash"]) for r in self.records)
-        repeated = {key: n for key, n in counts.items() if n > 1}
-        self.assertEqual(list(repeated.values()), [2], "the pair is still visible")
-        key = next(iter(repeated))
-        duplicate_records = [r for r in self.records if (r["chosen"], r["args_hash"]) == key]
-        self.assertEqual(duplicate_records[0]["decision"], "forward")
-        self.assertEqual(duplicate_records[-1]["decision"], "halt_duplicate")
-        self.assertEqual(duplicate_records[-1]["state"], "HALTED_DUPLICATE")
+    def test_the_run_stops_on_the_call_that_completes_the_evidence(self):
+        last = self.records[-1]
+        self.assertEqual(last["stop_check"]["missing"], [])
+        self.assertEqual(last["evidence_added"], ["sql.rows.repos"])
+        self.assertEqual(last["stop_check"]["evidence"], ["sql.rows.incidents", "sql.rows.repos", "sql.schema"])
+        self.assertEqual(last["stop_check"]["hit"], True)
 
-    def test_the_replayed_result_is_provably_the_earlier_one(self):
-        # R1 answers with the result the agent already had instead of an error.
-        # Equal digests prove it is the same bytes -- the replay is auditable,
-        # not merely asserted in a docstring.
+    def test_earlier_records_show_what_was_still_missing(self):
+        # The progress bar the UI draws (DESIGN 2.7) is this field, not a separate
+        # computation: every record says what was missing at that point.
         self.assertEqual(
-            self.records[-1]["result_digest"], self.records[2]["result_digest"]
+            self.records[0]["stop_check"]["missing"],
+            ["sql.rows.incidents", "sql.rows.repos"],
         )
-        self.assertFalse(self.result.turns[-1].is_error, "a duplicate read is answered, not refused")
+        self.assertEqual(self.records[2]["stop_check"]["missing"], ["sql.rows.repos"])
 
-    def test_attempted_shows_what_ran_before_the_verdict(self):
-        # R1 ran on every call (and passed on the first four); after each
-        # forwarded call R2 and R3 ran in priority order. The halted call never
-        # reached the post stage: R1 short circuits it, which is why neither
-        # "R2" nor "R3" appears in the last record.
-        self.assertEqual(self.records[-1]["stop_check"]["attempted"], ["R1"])
-        self.assertTrue(self.records[-1]["stop_check"]["hit"])
-        for record in self.records[:-1]:
-            self.assertEqual(record["stop_check"]["attempted"], ["R1", "R2", "R3"])
-            self.assertFalse(record["stop_check"]["hit"])
+    def test_the_checker_passes_on_the_delivered_result(self):
+        # R4 proves the *shape* of knowledge, not its correctness. This is the
+        # other half: the run stopped, and the answer it stopped on is right.
+        incidents = self.result.turns[2].payload["rows"]
+        self.assertEqual(
+            sorted(row["id"] for row in incidents), [2, 4], "the unresolved incidents"
+        )
+        stars = {row["name"]: row["stars"] for row in self.result.turns[-1].payload["rows"]}
+        self.assertEqual(
+            stars, {"maximhq/bifrost": 9100, "1012hopes/mcp-gateway": 1}
+        )
 
     def test_the_rules_version_names_the_installed_set(self):
         for record in self.records:
-            self.assertEqual(record["rules_version"], "rules-v0(R1,R2,R3)")
+            self.assertEqual(record["rules_version"], "rules-v0(R1,R4,R6,R2,R3)")
 
 
 @unittest.skipUnless(HAS_MCP, "mcp SDK not installed (run inside .venv)")
@@ -193,6 +215,9 @@ class BudgetRun(_RunMixin, unittest.TestCase):
     extra_args = ("--max-calls", "3")
 
     def test_r3_fires_on_the_call_that_spends_the_budget(self):
+        # Three calls is not enough for this task, so completeness cannot fire
+        # first -- which is the point: R3 is what remains when nothing else can
+        # decide.
         self.assertEqual(self.result.steps, 3)
         self.assertEqual(self.result.stop_reason, "halted")
         self.assertEqual(self.result.halt["rule"], "R3")
@@ -210,6 +235,43 @@ class BudgetRun(_RunMixin, unittest.TestCase):
         for record in self.records[:-1]:
             self.assertEqual(record["decision"], "forward")
             self.assertEqual(record["state"], "RUNNING")
+
+    def test_evidence_was_still_partial(self):
+        self.assertEqual(self.records[-1]["stop_check"]["missing"], ["sql.rows.repos"])
+
+
+@unittest.skipUnless(HAS_MCP, "mcp SDK not installed (run inside .venv)")
+class DuplicateRun(_RunMixin, unittest.TestCase):
+    """R1 installed: the duplicate is refused before it reaches the upstream."""
+
+    policy = ScriptedPolicy(
+        [
+            Action("sqlite.list_tables", {}),
+            Action("sqlite.list_tables", {}),
+            Action("sqlite.query", {"sql": "select 1"}),
+        ]
+    )
+
+    def test_r1_fires_before_the_upstream_is_touched(self):
+        self.assertEqual(self.result.steps, 2, "the third action is never reached")
+        self.assertEqual(self.result.halt["rule"], "R1")
+        self.assertEqual(self.result.halt["state"], "HALTED_DUPLICATE")
+
+    def test_the_replayed_result_is_provably_the_earlier_one(self):
+        # R1 answers with the result the agent already had instead of an error.
+        # Equal digests prove it is the same bytes -- the replay is auditable,
+        # not merely asserted in a docstring.
+        self.assertEqual(
+            self.records[-1]["result_digest"], self.records[0]["result_digest"]
+        )
+        self.assertFalse(
+            self.result.turns[-1].is_error, "a duplicate read is answered, not refused"
+        )
+
+    def test_the_second_call_was_blocked_not_forwarded(self):
+        self.assertEqual(self.records[-1]["decision"], "halt_duplicate")
+        # R1 runs at the pre stage, so the post-stage rules never saw this call.
+        self.assertEqual(self.records[-1]["stop_check"]["attempted"], ["R1"])
 
 
 @unittest.skipUnless(HAS_MCP, "mcp SDK not installed (run inside .venv)")
@@ -267,12 +329,97 @@ class SpinGovernedRun(_RunMixin, unittest.TestCase):
             self.records[-1]["result_digest"], self.records[-2]["result_digest"]
         )
 
+    def test_r4_cannot_fire_on_a_task_that_requires_nothing(self):
+        # The empty-set trap: ``required <= evidence`` is true for an empty
+        # requirement, so a bare subset test would declare this run complete on
+        # its first call and R2 would never be reached.
+        first = self.records[0]
+        self.assertEqual(first["stop_check"]["missing"], [])
+        self.assertFalse(first["stop_check"]["hit"], "R4 did not claim completion")
+        self.assertIn("R4", first["stop_check"]["attempted"], "R4 ran and declined")
+
     def test_the_final_result_is_still_delivered(self):
         # R2 judges after the fact. The result was paid for and is real evidence
         # of absence, so it is handed back along with the halt notice.
         self.assertFalse(self.result.turns[-1].is_error)
         self.assertEqual(self.records[-1]["decision"], "halt_no_progress")
-        self.assertEqual(self.records[-1]["stop_check"]["attempted"], ["R1", "R2"])
+        self.assertEqual(self.records[-1]["stop_check"]["attempted"], ["R1", "R6", "R4", "R2"])
+
+
+@unittest.skipUnless(HAS_MCP, "mcp SDK not installed (run inside .venv)")
+class DegradedRun(unittest.TestCase):
+    """R6: a required fact has no available producer, so the run says so at once.
+
+    The configuration has a single upstream (a stub), while ``sql.rows.repos``
+    declares ``sqlite.query`` as its only producer. In production this is a
+    server that was never deployed, or a tool frozen by schema drift; the gateway
+    cannot tell the difference and does not need to -- both mean "the fact cannot
+    arrive".
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._tmp = tempfile.TemporaryDirectory()
+        tmp = Path(cls._tmp.name)
+        config = {
+            "gateway": {"name": "mcp-gateway", "trace_dir": "traces/runs"},
+            "upstreams": [
+                {
+                    "name": "dirty",
+                    "command": "{python}",
+                    "args": ["-m", "mcp_servers.dirty_schema_server"],
+                    "cwd": "{root}",
+                }
+            ],
+        }
+        cfg = tmp / "gateway.json"
+        cfg.write_text(json.dumps(config), encoding="utf-8")
+
+        task = replace(
+            {t.id: t for t in load_tasks()}["t01"],
+            required_evidence=("sql.rows.repos",),
+            max_turns=5,
+        )
+        cls.result = run_task_sync(
+            task,
+            policy=ScriptedPolicy([Action("dirty.status", {})]),
+            run_id="degraded",
+            trace_dir=tmp,
+            extra_args=["--config", str(cfg)],
+        )
+        cls.records = _records(cls.result.trace_path)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    def test_the_run_stops_on_the_first_call(self):
+        # One record: the call was *refused*, not executed. Zero upstream calls
+        # in a run that cannot finish.
+        self.assertEqual(len(self.records), 1)
+        self.assertEqual(self.result.steps, 1)
+
+    def test_it_ends_degraded_and_not_on_the_budget(self):
+        self.assertEqual(self.result.halt["rule"], "R6")
+        self.assertEqual(self.result.halt["state"], "DEGRADED")
+        self.assertEqual(self.records[-1]["decision"], "halt_evidence_unreachable")
+
+    def test_the_reason_names_the_missing_producer(self):
+        reason = self.result.halt["reason"]
+        self.assertIn("sql.rows.repos", reason)
+        self.assertIn("sqlite.query", reason)
+
+    def test_the_missing_fact_is_recorded(self):
+        self.assertEqual(self.records[-1]["stop_check"]["missing"], ["sql.rows.repos"])
+        self.assertEqual(self.records[-1]["evidence_added"], [])
+
+    def test_the_offered_surface_explains_the_verdict(self):
+        # The unreachability is not an opinion: ``sqlite.query`` is simply not in
+        # the tool surface this run was given, and ``offered`` says so on the
+        # record the verdict is attached to.
+        offered = self.records[-1]["offered"]
+        self.assertIn("dirty.status", offered)
+        self.assertNotIn("sqlite.query", offered)
 
 
 if __name__ == "__main__":  # pragma: no cover

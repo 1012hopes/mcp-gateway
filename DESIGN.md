@@ -128,7 +128,7 @@
 | FR-1 | 作为单一 MCP server 接入，向下聚合 ≥2 个上游 MCP server | P0 | 单个端点能 `tools/list` 出全部工具 |
 | FR-2 | 工具命名空间隔离，冲突自动加前缀；schema 冲突时拒绝启动 | P0 | 两个上游同名工具可共存 |
 | FR-3 | 每轮生成 offered set（K 个工具），并记录到轨迹 | P0 | 轨迹里能看到 offered / chosen |
-| FR-4 | 四级终止判据：重复调用、无进展、预算耗尽、证据完备 | P0 | 20 条任务上可触发全部四级 |
+| FR-4 | 四级终止判据：重复调用、无进展、预算耗尽、证据完备（+ 证据不可得 → `DEGRADED` 分类，见 2.5） | P0 | 20 条任务上可触发全部四级；`DEGRADED` 在缺生产者的配置上触发 |
 | FR-5 | 哈希链轨迹写入，`verify` 能定位首个被篡改的位置 | P0 | 改任一字段，verify 报错并指出 seq |
 | FR-6 | `replay` 离线重放网关决策序列，断言与原始轨迹一致 | P0 | 重放输出的 decision 序列 hash 相同 |
 | FR-7 | 指标报告：停对/停早/停晚、误停率、调用数、Accuracy@K | P0 | 一条命令生成对照表 |
@@ -300,6 +300,10 @@
 | 11-09 | A2.1 | "按 schema 丢 volatile 字段 / 枚举做 lower" → 按键名白名单 + 大小写按工具族声明 | 实现时确认：按值形状判 UUID、全局折叠大小写都会**造出**重复，而误判比漏判贵（D7） |
 | 11-09 | A2（R2 状态） | `H(sorted(Evidence) ‖ last3(tool, args_hash))` → `H(sorted(Evidence) ‖ set(result_digest))` | 把**问题**并进状态，状态就会随问题变化：冒进式伪进展（换措辞再问一遍）在构造上永远不可能是"状态不变"，而它正是 R2 唯一要抓的行为。D8 实测：按旧式写，对抗任务只会停在 `max_turns` 或 R3（见 docs/progress.md） |
 | 11-09 | 2.3 schema | v1 → v2：`stop_check.state_hash` 可选键 | R2 的判据要能被复看：两条相邻记录指纹相同，"这一步什么都没学到"就从断言变成文件里的事实（D8） |
+| 11-09 | A3（证据模型） | 形状匹配 → **来源 + 参数谓词 + 形状** 三输入 | 只有形状时，t01 在第 3 步就被 R4 判完成（那时还没查星数）。"有些行回来了"≠"任务要的行回来了"，这是**误停**；发现它的是任务级 checker，不是证据模型自己（D9） |
+| 11-09 | A3（空结果） | "空结果是否算证据"从全局规则 → 按类型声明 | t02 的答案是"不存在"，若空集不算证据，这条 run 会跑到轮数上限；而 `file.content` 取不到又确实不该算（D9） |
+| 11-09 | 2.5 状态机 | `DEGRADED`：继续 → **终态**（R6 在 pre 阶段收束） | "生产者声明 + 可用工具集"在第一步就确定，继续跑只是为一个已成立的结论付钱；分类本身是指标的产出（D9） |
+| 11-09 | A2（规则表） | 新增 R6（priority 35，pre） | 初稿假设"证据取不到"在运行中才发现；实际是声明期事实，属于分类而非判定（D9） |
 
 ---
 
@@ -339,16 +343,15 @@ mcp-gateway/
 │   ├── wire.py          # ★ 停止通知的线格式：网关与 agent 唯一共享的模块
 │   ├── selector.py      # 工具准入（A1）
 │   ├── rules/
-│   │   ├── base.py      # ★ Rule 协议 + 注册表（按 priority 排序）
-│   │   ├── danger.py    # R5
 │   │   ├── duplicate.py # R1
-│   │   ├── complete.py  # R4
-│   │   ├── progress.py  # R2
+│   │   ├── evidence_complete.py # R4
+│   │   ├── unreachable.py       # R6
+│   │   ├── no_progress.py       # R2
 │   │   └── budget.py    # R3
 │   ├── stop/
 │   │   └── controller.py # ★ 只做编排：排序、短路、attempted，不含具体判据
-│   ├── evidence.py      # 证据集 + 抽取器注册
-│   ├── extractors/      # ★ ev_type → 纯函数，一类型一文件
+│   ├── evidence.py      # ★ 证据模型：来源 + 参数谓词 + 结果形状 → ev_type
+│   ├── limits.py        # Budget / CallSignature（叶子模块，解开 session↔rules 环）
 │   ├── trace/
 │   │   ├── canonical.py # 确定性序列化（键序 / 浮点 / 拒绝 NaN）
 │   │   ├── record.py    # ★ TraceRecord + schema 版本与演进
@@ -366,14 +369,17 @@ mcp-gateway/
 ├── tasks/               # 20 条任务 + 任务规格 JSON（D11 扩充）+ checker + 样本
 ├── config/
 │   ├── gateway.json     # 上游、K、预算（JSON 而非 YAML：零依赖、可 diff）
-│   ├── rules.json       # ★ 规则开关与参数（w=2 等）
-│   └── evidence.json    # 冻结的证据模型
+│   ├── evidence.json    # ★ 冻结的证据模型（D9 起启用）
+│   └── schema-manifest.json # 冻结的工具契约
 ├── traces/              # 运行产物（samples/ 入库，runs/ 与 demo/ 忽略）
 ├── scripts/
 │   ├── echo_client.py   # 端到端驱动：agent → 网关 → 上游 → 轨迹
 │   ├── failclosed_demo.py  # G1 的 S1/S2/S3 三段演示
 │   ├── make_sample.py   # 可复现的 12 步基线样例
 │   ├── tamper_demo.py   # 8 种篡改 + 1 个已知盲区
+│   ├── agent_demo.py    # 基线 vs 受控（规则装了没有的差别）
+│   ├── g2_demo.py       # G2：打转任务 11 → 3 步
+│   ├── evidence_demo.py # ★ D9：R4 收束 + 答案检查 + DEGRADED
 │   ├── experiment.py    # 基线/网关对照
 │   ├── freeze_schema.py # 冻结工具契约 / --check 检查漂移（D5）
 │   └── freeze_evidence.py
@@ -489,13 +495,15 @@ results_delivered == records_written        # run 正常结束或被中止时成
 RUNNING
   ├─ required ⊆ evidence        → HALTED_COMPLETE     （主动收束，最理想）
   ├─ dup(tool,args) 命中         → HALTED_DUPLICATE
+  ├─ 某类必需证据无可用生产者    → DEGRADED            （完成不可能，不是完成，也不是超时）
   ├─ w 轮无进展                  → HALTED_NO_PROGRESS
   ├─ 预算耗尽                    → HALTED_BUDGET
-  ├─ danger 工具                 → WAITING_APPROVAL
-  └─ 证据不可得（策略拒绝）      → DEGRADED（继续，但断言里标 missing）
+  └─ danger 工具                 → WAITING_APPROVAL
 ```
 
 `DEGRADED` 是必要设计：否则某一类证据永远取不到时，任务会跑到预算上限才停，误判为"停晚了"。
+
+> **口径变更（D9 落实）**：初稿写的是 `DEGRADED（继续，但断言里标 missing）`——降级后继续跑。实现时改了，理由是可证伪的：`required` 的生产者在 `config/evidence.json` 里是**声明过的**，可用工具集在第一次 `list_tools` 后就确定，所以"这个事实永远来不了"在第一步就是已知的，继续跑只是在为一个已经成立的结论付钱。因此 `DEGRADED` 进入 `TERMINAL_STATES`，由 R6 在 pre 阶段收束：**零次上游调用**。分类本身就是产出——指标表据此把它从"停晚了"里剔除，而不必给每个 DEGRADED 的 run 记一个 24 步的假超时。
 
 ### 2.6 连通性与兼容性策略
 
@@ -718,8 +726,11 @@ class Rule(Protocol):
 | 10 | R5 危险动作 | `tool ∈ dangerous` | WAITING_APPROVAL | 安全绝对优先，且必须早于证据完备，否则可能带着未授权动作收束 |
 | 20 | R1 重复调用 | ∃i<t: `tool_i=tool_t ∧ args_hash_i=args_hash_t` | HALT_DUPLICATE，回填上次结果（run 内缓存，D7 已实现） | 零成本可判，先砍最明显的浪费 |
 | 30 | R4 证据完备 | `required ⊆ Evidence_t` | HALT_COMPLETE | 主动收束，必须早于 R2，否则"本可以早停"会被误记成"打转" |
+| 35 | R6 证据不可得 | 某必需 `ev_type` 的**全部生产者**都不在 `offered` 里 | DEGRADED | 不是"停不停"，是"停不了"；必须早于 R2/R3，否则一个不可能完成的任务会被记成打转或超时 |
 | 40 | R2 无进展 | 信息状态指纹连续 w=2 轮不变 | HALT_NO_PROGRESS | 被动兜底，抓伪进展 |
 | 50 | R3 预算 | `calls > C_max ∨ tokens > T_max ∨ wall > W_max` | HALT_BUDGET | 最后一道保险 |
+
+> **新增 R6（D9）**：初稿的五条判据里没有"完成不可能"这一档，因为它假设"证据取不到"是运行中才发现的。实际实现里这是**声明期**就确定的事（生产者写在证据模型里），所以它属于分类而不是判定。名字排到 R6 是因为 R1–R5 已经在文档和代码里被引用；它插在 30 与 40 之间，语序上读作"已完成 → 不可能完成 → 在打转 → 没预算了"。
 
 **R2 的状态（D8 落实版，与初稿相反）**：
 
@@ -777,21 +788,44 @@ state_hash_t = H( sorted(Evidence_t) ‖ sorted(set(result_digests)) )
 | 任务族 | required | 说明 |
 |---|---|---|
 | 仓库调研 | `repo.list`, `file.content`, `commit.list` | 要看结构、要读实现、要看演进 |
-| 数据查询 | `sql.schema`, `sql.rows` | 先有表结构再有数据 |
+| 数据查询（当前） | `sql.schema`, `sql.rows.incidents`, `sql.rows.repos` | 结构 + 两份**不同**的行数据 |
 | 知识检索 | `wiki.page` | — |
 
-**抽取方式**（二选一，都用确定性方法）：
+**一个 `ev_type` 由三个输入共同决定**（D9 落实版）：
 
-- (a) **静态声明**：工具 schema 的出参映射到 ev_type，写在配置里。20 条任务规模下手写最划算。
-- (b) **规则抽取**：结果 JSON 的字段签名匹配（如出现 `rows` 且非空 → `sql.rows`）。
+```
+tool ∈ producers            谁有资格生产这个事实
+args 命中 args 谓词          问的是哪个问题
+result 命中某个 shape        回来的是什么形状
+```
+
+三个都满足才算获得。声明放在 `config/evidence.json`（数据），解释器固定在 `gateway/evidence.py`（代码），因此抽取是纯函数：同一个 `(payload, tool, args)` 永远得到同一组 `ev_type`——重放依赖这一点。
+
+| 环节 | 内容 | 为什么必须这样 |
+|---|---|---|
+| producers | `sql.rows.repos` → `["sqlite.query"]` | 没有它，一个 stub server 的假行集可以满足关于真库的任务。**准入是按来源判定的，不是按形状** |
+| args 谓词 | `{"key":"sql","op":"contains","value":"from repos"}` | 形状分不出"查了 incidents"和"查了 repos"——两者都是 `{"rows":[...]}` |
+| shapes | `[["rows"]]` / `[["tables"],["table","columns"]]` | 只检查**键存在**，不检查值。空行集也算（见下） |
+
+**这条 args 谓词是 D9 现场发现必须加的**：第一版只做形状匹配，t01 在**第 3 步**就被 R4 判为完成——那一刻只读过 incidents，星数一个都没查。判据没错、抽取没错，错在"某些行回来了"被当成了"任务要的那几行回来了"。这就是**误停**，比漏判贵得多，所以形状之外补上"问了什么"。发现它的是任务级 checker，不是证据模型自己——**判据无法自证，必须靠一个独立的答案检查**。
+
+**抽取方式**：确定性规则 + 声明式配置（DESIGN 原列的 (a) 静态声明与 (b) 字段签名匹配，实现时合并成一条：来源 + 参数谓词 + 结果形状）。20 条任务规模下手写最划算，也不需要任何模型。
 
 **判定**：`required ⊆ Evidence_t` → complete。
 
 **误差处理**：
-- 某项证据被 policy 永久拒绝 → 进入 `DEGRADED`，断言里列 `missing`，不阻塞收束
-- 结果为空但调用成功 → 是否算"获得证据"要区分：`sql.rows` 空集仍是"查过了"的证据，计入；`file.content` 取不到则不计入
+- 空结果算不算、按类型声明：`sql.rows.*` 的 `{"rows": []}` **计入**——"查过了、没有"是知识，对抗任务 t02 完全依赖这一条；否则"这个 repo 不存在"会被当成答案不完整，run 一路跑到预算上限。
+- `is_error` 的结果**一律不计**：错误是"没有答案"，不是"答案是没有"。
+- 结果被截断（`truncated=true`）**一律不计**：半个行集算证据，就会得到一次假完成（2.6 坑 2）。顺序上必须先判截断再抽取，D9 之前这两步是反的。
+- 抽取异常 → 该项记 `missing`，不记 `complete`。
 
-**复杂度**：集合运算 O(|required|)，可忽略。
+**证据集里存什么**：只存 `{ev_type: 生产它的工具}`。不存 payload——轨迹不能变成数据副本；`seq` 已经在记录里，"哪一步拿到的"是免费的。轨迹字段 `evidence`（累计，排序）与 `evidence_added`（本步增量）都是它的投影。
+
+**证据与记录同一次提交**（D9 收尾时补的约束）：抽取发生在写盘**之前**（post 阶段规则必须看到本步刚产生的事实），但 `session.evidence` 只在记录落盘成功之后才增长。判定用合并视图 `session.evidence ∪ pending`，落盘成功才 `add_evidence(pending)`；写失败则 run 中止、pending 丢弃。理由与 `result_digest` 逐字相同（1.5）：**session 不能声称知道轨迹证明不了的事实**，否则 fail-closed 的 run 会在 `stats` 里报告一组自己没留下的证据。合并而非替换这一点不显眼但致命——若把 `pending` 当成替代视图，规则会在**完成的那一步**看到 `missing` 反而变多，R4 永不触发，run 继续跑到 R1 抓到重复为止（D9 收尾实测踩过：9 步基线 → 5 步 + `HALTED_DUPLICATE`，而不是 4 步 + `HALTED_COMPLETE`）。
+
+**R6 的输入是同一个模型**：`unavailable(required, offered)` 返回"所有生产者都不在可用工具集里"的类型。它看到的是**网关自己的准入决定**（`offered` 里没有），不是对 agent 意图的猜测——这条边界写进 6 的局限。
+
+**复杂度**：集合运算 O(|required|) + 每个结果 O(|types|·|shapes|)，都可忽略。
 
 ---
 
@@ -899,12 +933,16 @@ L2 只做"必需字段存在性"检查，**不检查多余字段**——这正�
 7. **哈希链只能定位篡改，不能阻止"重写整条尾链"**：改一条记录后把后续 `prev_hash` 与 `hash` 全部重算，链依然自洽（`tests/test_verify.py::test_rewriting_the_whole_tail_produces_a_valid_chain` 断言的正是这个盲区）。同理，删掉尾部 N 行也检不出。要封住这两处需要**外部锚定**——链头签名、发布到只追加日志、或每次运行结束把末条 `hash` 打进 git tag。本项目只做到"局部改动必被检出"，并在 `verify` 成功时**显式打印这条限制**，避免使用者把"链完整"误读成"无遗漏"
 8. **R1 的回填假设"上游在一轮 run 内是参数的函数"**：回填的是上次结果，若上游在这期间可变，回填的可能是过期数据。本项目的上游是只读的（`mode=ro`），这条假设成立；换成可写上游，R1 必须退化为"拦截并说明"（不返回任何数据），或改为重新执行但只记一次——两种选法都要写进 trace 的 `decision`，否则"回填"和"重算"在事后无法区分
 9. **R2 的"无进展"以逐字节重复的回答为依据**：上游若在每次响应里带时间戳、请求 id 或随机排序，两次语义相同的查询也会得到不同摘要，R2 就再也判不出停滞（`tests/test_rules.py` 只覆盖了它会判对的情形，覆盖不了它判不出的情形）。因此 R2 定位为**被动兜底**：真正承担"该收了"的是 R4（`required ⊆ Evidence`），它不依赖答案是否重复。把这条写出来，是为了避免把 R2 的低命中率误读成"任务都很健康"
+10. **证据证明的是"读过什么"，不是"读对了什么"**：`sql.rows.incidents` 的判据是"问了 incidents、拿回了行集"，一个 `where repo = 'ghost/typo'` 的查询同样满足它，而答案可能是错的。R4 只能保证任务所需的事实类型都到齐，**对不对要由任务级 checker 判**（D12）。这就是为什么验收标准写的是"R4 触发**且** checker 通过"，两条缺一不可
+11. **参数谓词是字符串包含，不是 SQL 解析**：`{"key":"sql","op":"contains","value":"from repos"}` 会被 `select * from repos_backup` 命中。换更严的判据需要 SQL 解析器，而那会让证据模型比它审的对象更难信任。保守方向同理——判据宁可漏判（run 停在 max_turns，`missing` 有记录），不可误判（假完成）
+12. **R6 看的是网关的准入决定，不是 agent 的意图**：`offered` 里没有生产者 → `DEGRADED`，这是确定的。但一个"从来没试过那个工具"的 agent 与一个健康的 agent 在网关眼里完全一样，直到轮数上限才分开；此时轨迹里 `missing` 非空，能看出问题，但停得晚。要让网关知道"agent 已经放弃"，需要 agent 侧主动上报——那是协议扩展，不在当前范围
+13. **`--require` 写错类型是拒绝启动，不是降级**：`--require sql.row` 会让网关以 exit 2 退出并列出已声明的类型。这是刻意的：把它当成"证据不可得"会让每个任务在第一步就 `DEGRADED`，而那种失败看起来像正常运行
 
 ---
 
 ## 7. 后续价值延续
 
-> 前提声明：本节全部建立在"D15 有一个能跑的产物"之上。**当前仓库已到 D8（轨迹链 + 多上游 + 生命周期 + R1/R2/R3 已跑通，判据插槽只剩 R4/R5）**，但证据集、任务集、指标表都没有——所以本节仍是计划，且每条轨道的前提条件都单独标注了。
+> 前提声明：本节全部建立在"D15 有一个能跑的产物"之上。**当前仓库已到 D9（轨迹链 + 多上游 + 生命周期 + 证据模型 + R1/R2/R3/R4/R6 已跑通，判据只剩 R5；任务集与指标表未做）**——所以本节仍是计划，且每条轨道的前提条件都单独标注了。
 
 ### 7.1 先分清"延续"与"扩散"
 

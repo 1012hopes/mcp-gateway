@@ -394,7 +394,7 @@ TraceRecord（一行一个 JSON，**哈希覆盖全字节 + 版本解释语义**
   result_digest   str           # 上游结果摘要（不存全文，避免泄密）
   truncated       bool          # 结果是否被截断（影响证据完备判定，见 2.6）
   evidence_added  [str]         # 本次调用新增的证据类型
-  stop_check      {rule, hit, evidence[], missing[]}
+  stop_check      {rule, hit, evidence[], missing[], attempted[]}
   decision        str           # forward | block_duplicate | halt_complete | ...
   state           str           # RUNNING | HALTED_* | DEGRADED（2.5 状态机快照）
   latency_ms      int

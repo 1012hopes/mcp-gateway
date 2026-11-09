@@ -34,6 +34,7 @@ from .tasks import TaskSpec
 __all__ = [
     "Action",
     "AgentContext",
+    "FutileSearchPolicy",
     "Observation",
     "Policy",
     "ReactivePolicy",
@@ -145,6 +146,64 @@ def stars_sql(repos: Iterable[str]) -> str:
         return "select name, stars from repos order by stars desc"
     quoted = ", ".join("'" + name.replace("'", "''") + "'" for name in names)
     return f"select name, stars from repos where name in ({quoted}) order by name"
+
+
+#: Rephrasings of the same unanswerable question. Every one of them returns the
+#: same empty row set, which is what makes them *pseudo*-progress: the SQL text
+#: differs (so R1 sees a new call every time), the answer does not.
+#:
+#: More variants than the task's ``max_turns`` on purpose: if the list were
+#: shorter the spin would wrap around and start repeating itself exactly, and the
+#: baseline would then contain R1's target instead of R2's. A task that tests one
+#: rule must not accidentally test another.
+FUTILE_SQL: Tuple[str, ...] = (
+    "select id, repo, severity from incidents where repo = 'ghost/typo'",
+    "select id, repo, severity from incidents where lower(repo) = lower('ghost/typo')",
+    "select id, repo, severity from incidents where repo like '%ghost%'",
+    "select id, repo, severity from incidents where repo glob 'ghost/*'",
+    "select id, repo, severity from incidents where instr(repo, 'typo') > 0",
+    "select id, repo, severity from incidents where trim(repo) = 'ghost/typo'",
+    "select id, repo, severity from incidents where repo like 'ghost%'",
+    "select id, repo, severity from incidents where upper(repo) = upper('ghost/typo')",
+    "select id, repo, severity from incidents where repo like '%/typo'",
+    "select id, repo, severity from incidents where repo like '_host/typo'",
+    "select id, repo, severity from incidents where substr(repo, 1, 5) = 'ghost'",
+    "select id, repo, severity from incidents "
+    "where repo != 'ghost/typo' and repo = 'ghost/typo'",
+)
+
+
+class FutileSearchPolicy:
+    """An agent that cannot accept "it is not there".
+
+    This is the adversarial baseline for G2, written as a policy rather than as a
+    scripted list because the point is the *behaviour*, not the calls: after
+    learning the schema it keeps asking the same question in slightly different
+    words, forever, and every answer is the same empty set.
+
+    It is not a strawman. "Search again, differently" is the single most common
+    way an agent burns a budget without learning anything, and no individual call
+    is wrong -- which is exactly why the decision cannot live in the agent's
+    prompt (DESIGN 0.2). The run must be stopped from outside, on evidence the
+    agent itself produced.
+    """
+
+    name = "futile_search"
+
+    def next_action(self, ctx: AgentContext) -> Optional[Action]:
+        if not ctx.tools:
+            return None
+        if not ctx.history:
+            # One look at the schema, then it is sure it knows what to ask.
+            return (
+                Action("sqlite.list_tables", {})
+                if "sqlite.list_tables" in ctx.tools
+                else None
+            )
+        position = (len(ctx.history) - 1) % len(FUTILE_SQL)
+        if "sqlite.query" not in ctx.tools:
+            return None
+        return Action("sqlite.query", {"sql": FUTILE_SQL[position], "limit": 20})
 
 
 class ReactivePolicy:
@@ -274,4 +333,6 @@ class ScriptedPolicy:
 def policy_for(name: str) -> Policy:
     if name in ("reactive_sqlite", "reactive", ""):
         return ReactivePolicy()
+    if name in ("futile_search", "futile"):
+        return FutileSearchPolicy()
     raise ValueError(f"unknown policy {name!r}")

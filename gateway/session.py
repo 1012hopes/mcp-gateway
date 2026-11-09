@@ -129,6 +129,12 @@ class RunSession:
     required: Set[str] = field(default_factory=set)
     evidence: Dict[str, str] = field(default_factory=dict)
     history: List[CallSignature] = field(default_factory=list)
+    #: Digests of the results this run delivered, in order. R2 reads the *set*:
+    #: a result that repeats one already delivered taught the run nothing.
+    result_digests: List[str] = field(default_factory=list)
+    #: Fingerprint after each committed call, oldest first. The trace carries the
+    #: same value per record, so a plateau is visible in the file itself.
+    state_trail: List[str] = field(default_factory=list)
 
     clock: Any = time.monotonic
     started_at: Optional[float] = None
@@ -226,6 +232,33 @@ class RunSession:
             self.evidence[ev_type] = source
             added.append(ev_type)
         return added
+
+    # -- R2's information state -------------------------------------------
+
+    def state_hash(self, *pending: str) -> str:
+        """Fingerprint of what the run *knows*: evidence plus result digests.
+
+        Deliberately not ``(tool, args_hash)`` (DESIGN's first draft): folding
+        the *questions* into the state makes the state change whenever the
+        question changes, so "ask the same thing a different way and learn
+        nothing" -- the exact behaviour R2 exists to catch -- can never look
+        like no-progress. It would only ever see literal cycles, which R1
+        already catches one stage earlier.
+
+        Both inputs are sets that only ever grow, so this value changes **iff**
+        the run learned something. ``pending`` is for a result that has not been
+        committed yet: the post-stage guard must judge the call *before* the
+        record is written, and a digest absorbed before the write would leave
+        the session claiming knowledge the trace does not have.
+        """
+        results = set(self.result_digests)
+        results.update(pending)
+        return digest_of({"evidence": sorted(self.evidence), "results": sorted(results)})
+
+    def commit_result(self, digest: str) -> None:
+        """Absorb a delivered result. Called only after its record landed."""
+        self.result_digests.append(digest)
+        self.state_trail.append(self.state_hash())
 
     # -- the write path ----------------------------------------------------
 

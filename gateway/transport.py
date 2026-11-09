@@ -43,7 +43,7 @@ from mcp.server.stdio import stdio_server
 from .config import GatewayConfig
 from .limits import CallSignature
 from .registry import Registry, ToolEntry, build_registry
-from .session import MAX_RESULT_BYTES, RunSession, extract_evidence
+from .session import MAX_RESULT_BYTES, RunSession, digest_of, extract_evidence
 from .stop import POST, PRE, StopContext, StopController, StopVerdict, merge_checks
 from .trace.sink import TraceChainError, TraceWriteError
 from .upstream import StdioUpstream, UpstreamFailure, tail_of_exception
@@ -146,7 +146,9 @@ class Gateway:
         registry = await self.registry()
         return types.ListToolsResult(tools=[entry.to_mcp() for entry in registry.offered])
 
-    def stop_context(self, tool: str, args_hash: str) -> StopContext:
+    def stop_context(
+        self, tool: str, args_hash: str, *, state_hash: Optional[str] = None
+    ) -> StopContext:
         """Snapshot the run for a rule. Built here so rules never see the session."""
         session = self.session
         return StopContext(
@@ -163,6 +165,8 @@ class Gateway:
             # reviewer reads off the trace, and that record is seq 3.
             calls_used=session.records_written + 1,
             wall_ms=session.wall_ms(),
+            state_trail=tuple(session.state_trail),
+            state_hash=state_hash,
         )
 
     def _refuse(self, session: RunSession) -> types.CallToolResult:
@@ -199,6 +203,12 @@ class Gateway:
         verdict: Optional[StopVerdict] = None
         evidence_added: List[str] = []
         keep_result = True
+        #: Fingerprint of what the run knows at this point. Updated to the
+        #: provisional *after* state once the result exists, and only absorbed by
+        #: the session once the record has landed -- the session must never claim
+        #: knowledge the trace cannot prove (see ``commit_result``).
+        state_hash = session.state_hash()
+        committed: Optional[str] = None
 
         # -- steps 2-3: pre-stage guards ----------------------------------
         pre = self.controller.evaluate(PRE, self.stop_context(chosen, signature.args_hash))
@@ -238,7 +248,16 @@ class Gateway:
 
             # -- steps 5-6: evidence, then post-stage guards ---------------
             evidence_added = session.add_evidence(extract_evidence(payload))
-            post = self.controller.evaluate(POST, self.stop_context(chosen, signature.args_hash))
+            # The digest is computed once, before the write, because R2 has to
+            # judge *this* result and the record that will hold it must agree:
+            # a provisional hash that the trace then contradicts would make the
+            # plateau unreadable exactly where it matters.
+            committed = digest_of(payload)
+            state_hash = session.state_hash(committed)
+            post = self.controller.evaluate(
+                POST,
+                self.stop_context(chosen, signature.args_hash, state_hash=state_hash),
+            )
             attempted.extend(post.attempted)
             if post.verdict is not None:
                 verdict = post.verdict
@@ -252,6 +271,7 @@ class Gateway:
             attempted=attempted,
             evidence=session.evidence,
             missing=session.missing,
+            state_hash=state_hash,
         )
 
         try:
@@ -275,6 +295,13 @@ class Gateway:
                 "trace write failed; run aborted and this result is discarded "
                 "(fail-closed)"
             )
+
+        if committed is not None:
+            # Only now: the state may claim this result only once the record that
+            # proves it exists. A blocked call never reaches here -- it taught the
+            # run nothing and R1's replay hands back an earlier result whose
+            # digest is already absorbed.
+            session.commit_result(committed)
 
         if keep_result:
             # Remembered only after the record landed: the cache is a cache of

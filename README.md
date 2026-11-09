@@ -7,7 +7,7 @@
 
 一句话概括差异化：**别的网关管"谁能调"，这个管"什么时候该停"，并且能证明那次停是对的。**
 
-> 状态：**D7 / D18**（轨迹层 + 多上游 + 生命周期 + 参数归一化 + R1 重复调用 / R3 预算已跑通；R2/R4 与证据集待做）。进度见 [`PLAN.md`](PLAN.md) 与 [`docs/progress.md`](docs/progress.md)。
+> 状态：**D8 / D18**（轨迹层 + 多上游 + 生命周期 + 参数归一化 + R1 重复 / R2 无进展 / R3 预算已跑通；R4 证据完备与证据集待做）。进度见 [`PLAN.md`](PLAN.md) 与 [`docs/progress.md`](docs/progress.md)。
 
 ## 它解决什么问题
 
@@ -43,7 +43,8 @@ recursion_limit = 25  # LangGraph
 | D5 | 多上游 + 工具面归一 + schema 漂移冻结 | ✅ |
 | D6 | 生命周期接线 + 证据/预算上下文 + Agent 循环 + 完整轨迹 | ✅ 182 tests |
 | D7 | 参数归一化 + R1 重复调用 + R3 预算（**同任务 9 步 → 5 步**） | ✅ 241 tests |
-| D8–D9 | R2 无进展 → R4 证据完备 + **G2 演示** | 待做 |
+| D8 | R2 无进展 + 规则集 R1/R2/R3 + **G2 演示**（**打转任务 11 步 → 3 步**） | ✅ 271 tests |
+| D9 | 证据模型 + R4 证据完备 + DEGRADED | 待做 |
 | D10–D12 | run 边界 + 20 条任务 + checker + **G3 指标表** | 待做 |
 
 ## 快速开始
@@ -59,6 +60,9 @@ uv run python scripts/echo_client.py
 # D6/D7：同一条任务跑两遍（无规则 vs 有规则），对比步数并自检
 uv run python scripts/agent_demo.py
 uv run python scripts/agent_demo.py --max-calls 3    # 用 R3 收束而不是 R1
+
+# G2 演示：一条必然打转的任务，11 步压到 3 步，平台期在轨迹里可见
+uv run python scripts/g2_demo.py
 
 # G1 演示：正常运行 / 真实拔掉写权限 / 注入写盘失败
 uv run python scripts/failclosed_demo.py
@@ -102,7 +106,7 @@ python -m gateway.trace verify traces/samples/demo-12-steps.jsonl
 
 **Agent 侧**（`agent/`，独立于网关的客户端）：`ReactivePolicy` 每一步都从**上一步的结果**推下一步，写完有用步骤后进入"再验一遍"阶段——它不知道什么时候该停。这不是缺陷，是 R4 要压缩的那段行为，也是指标的分母。换成真模型只需替换 `next_action`，循环、轨迹、规则都不用动。
 
-## 判据：从 R1 开始（D7）
+## 判据：从 R1 开始（D7），到 R2 收住打转（D8）
 
 同一条任务，同一套策略，只差网关里有没有装规则：
 
@@ -115,16 +119,34 @@ governed -- rules installed
 steps: 9 -> 5  (saved 4)
 ```
 
+R1 只能砍"逐字重复"。换措辞、换排序、换工具再问一遍——答案一模一样，R1 看不见，那要 R2：
+
+```
+t02: 找一个库里没有的 repo
+baseline (--no-rules)                   governed
+  1. sqlite.list_tables   state=d154…     1. sqlite.list_tables   state=d154…
+  2. sqlite.query         state=0366…     2. sqlite.query         state=0366…
+  3. sqlite.query         state=0366…     3. sqlite.query         state=0366…  <- same state
+  ... 8 more identical answers ...       stop: halted  rule=R2  state=HALTED_NO_PROGRESS
+ 11. sqlite.query         state=0366…    steps: 11 -> 3  (saved 8)
+stop: max_turns after 11 steps
+```
+
+`state` 是这一行记录的**信息指纹**（`stop_check.state_hash`）：证据集 ∪ 已交付结果的摘要集合。两个集合都只增，所以指纹**当且仅当运行学到东西时**变化。上面的平台期不是推断，是文件里的两行相等。
+
 | 规则 | priority | 阶段 | 命中后 | 为什么在这个位置 |
 |---|---|---|---|---|
 | R1 重复调用 | 20 | pre | `HALTED_DUPLICATE`，**回填上次结果** | 价值在于让这次调用不发生 |
+| R2 无进展 | 40 | post | `HALTED_NO_PROGRESS` | 要看到答案才能判"有没有学到"；兜底，不是压缩器 |
 | R3 预算耗尽 | 50 | post | `HALTED_BUDGET` | 最后一道保险；跑到这里说明任务没做完 |
 
-三件值得单独说的事：
+四件值得单独说的事：
 
 **重复不等于错误。** R1 命中后不返回错误，而是把上次的结果还给模型——数据本来就在上下文里，重发一遍比报错有用。可验证性没有因此打折：回填结果的 `result_digest` 与被重复那一步相等，所以"这是同一份数据"是**被证明**的，不是被声称的。
 
 **"同一个调用"是 `(tool, args_hash)`，不是 `args_hash`。** `count_rows({"table":"x"})` 和 `describe_table({"table":"x"})` 参数相同、问题不同；只看摘要会把"换个工具问同一件事"误判成重复，而那恰好是无进展判定该抓的伪进展。
+
+**"无进展"里不能有问题。** `state_hash` 只合入**证据**和**答案摘要**，不合物 `(tool, args)`——把问题并进状态，状态就会随问题变化，"换个措辞再问一遍"在构造上永远不可能是"状态不变"，而这正是 R2 唯一要抓的东西。D8 用旧公式重算过那条 11 步基线：11 步 11 个不同状态，一次都触发不了（见 `docs/progress.md`）。
 
 **归一化是判据的前提，不是格式美化。** 参数里带 `request_id`、浮点尾差或键序不同，R1 就永远不会触发——而且不报错，只让所有数字静默归零。所以 `stop/normalize.py` 的每条规则都成对存在：丢掉噪声，**同时**保住语义。两条保守原则：volatile 键**按键名**判定（UUID 形状的值在 `id` 下就是"要查哪一行"），大小写折叠**按工具族声明**（SQLite 标识符不区分大小写，别的不一定）。误判一个重复的代价是停掉一个健康的 run 并在轨迹里留下一条错决策——比漏判贵得多。
 
@@ -177,6 +199,7 @@ gateway/
   stop/controller.py 停止控制器：排序、短路、attempted 日志（**不含任何判据**）
   stop/normalize.py  参数归一化：调用身份的唯一定义处（A2.1）
   rules/duplicate.py R1 重复调用（pre，回填上次结果）
+  rules/no_progress.py R2 无进展（post，信息指纹连续两次不变）
   rules/budget.py    R3 预算耗尽（post，最后一道保险）
   wire.py            停止通知的线格式——网关与 agent 唯一共享的模块
   registry.py        工具面：schema 归一、命名空间、schema_hash、漂移冻结
@@ -190,15 +213,18 @@ gateway/
 agent/               客户端：policy（决策）/ loop（驱动）/ tasks（任务规格）
 mcp_servers/sqlite_server.py        只读 SQLite 上游（数据固定可复现）
 mcp_servers/dirty_schema_server.py  故意不合规的上游（$ref / oneOf / 非法名）
-tasks/01_unresolved_incidents.json  一条任务：目标 + 必需证据 + 轮数上限
+tasks/01_unresolved_incidents.json  正常任务：目标 + 必需证据 + 轮数上限
+tasks/02_unanswerable_repo.json      对抗任务：库里没有的 repo，专门诱发"换个说法再问"
 config/gateway.json                 上游、trace 目录、模型标识
 config/schema-manifest.json         冻结的工具契约（入库，改上游后重跑冻结）
 scripts/echo_client.py              端到端驱动（固定调用表，D4 产物）
 scripts/agent_demo.py               D7：基线 vs 受控，同一任务两遍 + 10 项自检
+scripts/g2_demo.py                  G2：打转任务 11 步 -> 3 步 + 8 项自检
 scripts/failclosed_demo.py          G1 的 S1/S2/S3
 scripts/tamper_demo.py              8 个篡改用例
 scripts/freeze_schema.py            冻结 / `--check` 检查 schema 漂移
 docs/demo-g1.md                     G1 台词与录屏脚本
+docs/demo-g2.md                     G2 台词与录屏脚本
 ```
 
 ## 三个设计决定，值得单独说
@@ -224,6 +250,7 @@ docs/demo-g1.md                     G1 台词与录屏脚本
 - 工具返回内容会进模型上下文，存在提示注入面，只能约束"结果不解析为控制流"
 - **schema 漂移时工具直接消失**：从 `offered` 移除、调用返回 `block_schema_drift`，而不是降级继续。这是刻意的（历史轨迹可比性优先），但现场看起来像"网关坏了"，所以 `registry: schema-drift:...` 会打到 stderr
 - **R1 的回填假设上游在一轮 run 内是参数的函数**：回填的是上次结果，上游若可变，回填的可能是过期数据。当前上游只读（`mode=ro`），假设成立；换可写上游时必须退化为"拦截并说明"，并把退化写进 `decision`
+- **R2 判"无进展"靠逐字节重复的答案**：上游若在每次响应里塞时间戳、请求 id 或随机排序，语义相同的两次查询也会得到不同摘要，R2 就再也判不出停滞。它因此是被动兜底——真正承担"该收了"的是 R4，它不依赖答案是否重复。别把 R2 的低命中率读成"任务都很健康"
 - 参数在 20 条任务上标定，样本量不做显著性检验，只报配对差值
 
 ## License

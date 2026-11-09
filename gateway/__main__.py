@@ -28,7 +28,7 @@ import anyio
 
 from .config import GatewayConfig, load_config, repo_root
 from .registry import RegistryError, load_baseline
-from .rules import BudgetExhausted, DuplicateCall
+from .rules import BudgetExhausted, DuplicateCall, NoProgress
 from .session import Budget, RunSession, new_run_id, new_session_id
 from .stop import StopController
 from .trace.sink import JsonlSink, TraceChainError, TraceWriteError
@@ -86,7 +86,7 @@ def build_controller(*, enabled: bool = True) -> StopController:
     """
     if not enabled:
         return StopController(())
-    return StopController((DuplicateCall(), BudgetExhausted()))
+    return StopController((DuplicateCall(), NoProgress(), BudgetExhausted()))
 
 
 def prepare(config: GatewayConfig, args: argparse.Namespace) -> RunSession:

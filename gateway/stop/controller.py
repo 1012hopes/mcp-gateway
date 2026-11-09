@@ -74,6 +74,12 @@ class StopContext:
     #: that halts on "call 3 of 3" agrees with the ``seq`` a reviewer reads.
     calls_used: int
     wall_ms: int
+    #: Information fingerprints of the calls already committed, oldest first.
+    #: ``state_trail[-1]`` is what the run knew before the call being judged.
+    state_trail: Tuple[str, ...] = ()
+    #: Fingerprint *after* this call's result (post-stage only). ``None`` before
+    #: the result exists -- R2 cannot judge a call it has not seen the answer to.
+    state_hash: Optional[str] = None
 
     @property
     def missing(self) -> FrozenSet[str]:
@@ -177,6 +183,7 @@ def merge_checks(
     attempted: Sequence[str],
     evidence: Iterable[str],
     missing: Iterable[str],
+    state_hash: Optional[str] = None,
 ) -> StopCheck:
     """Assemble the trace field. Kept here so the trace never invents a shape."""
     return StopCheck(
@@ -185,4 +192,5 @@ def merge_checks(
         evidence=sorted(set(evidence)),
         missing=sorted(set(missing)),
         attempted=list(attempted),
+        state_hash=state_hash,
     )

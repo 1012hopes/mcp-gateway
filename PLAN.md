@@ -48,7 +48,7 @@
 | D5 | 11-16 | 多上游 + 命名空间 + schema 归一 | `registry.py`、上游配置 | 两上游并存、工具名无冲突、`schema_hash` 跨重启稳定；`$ref/oneOf` 归一后不为空 |
 | D6 | 11-17 | 生命周期接线 + 轨迹落盘 | `gateway/__main__.py` 装配、`session.py` | 一次真实任务产出完整 trace，每行含 `offered`（此阶段全量）、`chosen`、`prev_hash` |
 | D7 | 11-18 | 参数归一化 + R1 + R3 | `gateway/stop/normalize.py`、`rules/duplicate.py`、`rules/budget.py` | 归一化单测覆盖 timestamp/UUID/键序/浮点/大小写；R1、R3 **各至少触发 1 次**（断言命中率 > 0） |
-| D8 | 11-19 | R2 无进展 + 规则注册表 | `rules/no_progress.py`、`stop/controller.py` 接入 R1/R2/R3 | `state_hash` 含最近 3 次调用签名；`stop_check.attempted` 非空；对抗任务步数显著下降 |
+| D8 | 11-19 | R2 无进展 + 规则注册表 | `rules/no_progress.py`、`stop/controller.py` 接入 R1/R2/R3 | `state_hash = H(证据集 ‖ 结果摘要集合)`（口径已改，见下）；`stop_check.attempted` 非空；对抗任务步数显著下降 |
 
 **这一阶段最容易静默失败的两处**，每天收工前必须自检一次：
 1. `R1/R2` 命中次数是否为 0（为 0 说明归一化没生效，指标会全变 0 且不报错）
@@ -57,6 +57,12 @@
 > **计划变更（D6 记录）**：`stop/controller.py` 从 D8 提前到 D6。原因：D6 的"生命周期接线"若不包含 pre/post 两段插槽，D7 插 R1 时必然回头改 transport——那是同一天做两遍。D6 交付空控制器 + 零规则（`rules-v0(none)`），D7/D8 只加规则文件与一个元组字面量。影响 gate：无（G2 仍是 D8 的"步数显著下降"）。
 
 > **计划变更（D7 记录）**：新增 `--no-rules`（空控制器）。原计划假设"基线 = 当前 commit 的行为"，但规则一装上，D6 的 9 步就再也跑不出来；D12 的对照表需要那个数当分母，靠回滚 commit 取分母必然过期。现在基线是一条命令（`scripts/agent_demo.py` 跑两遍并打印差值）。同时 R1 的"回填上次结果"按 2.4 的口径真做出来了（transport 持 run 内缓存），没有退化成"拦截并说明"。影响 gate：无（G2 判据不变；R1 命中后缺口从 9 步缩到 5 步，剩下的 1 步是 R4 的事）。
+
+> **G2 结果（D8 记录）**：**通过**——`scripts/g2_demo.py`，对抗任务 `t02` 从 **11 步压到 3 步**（8 项自检全 PASS），R2 在第二个相同答案处收束，基线 11 步全程**无逐字重复**（所以是 R2 抓的，不是 R1）。两处与计划预想不同的地方，记录如下：
+> 1. **路径不同**：计划假设"3 轮循环被识破"，实际是"1 步热身 + 2 个逐字节相同的答案"，第 3 步就停。数字对上了，但复盘时别把巧合当设计。
+> 2. **R2 的状态公式被改**：`H(Evidence ‖ last3(tool,args_hash))` → `H(Evidence ‖ set(result_digest))`。旧式把"问题"并进状态，伪进展在构造上永远触发不了（用 11 步基线重算：旧式看到 11 个不同状态）。影响 gate：无，但这是 A2 的口径变更，已写进 DESIGN 变更记录。
+> 3. **`schema_version` 升到 v2**（`stop_check.state_hash`）。否则"R2 为什么停在这里"只能靠推理，不能在文件里指出来。影响 gate：无。
+> 4. **t02 提前到 D8**（任务集本属 D11）。没有对抗任务，G2 无法验收；D11 只扩充文件。
 
 ### 阶段三：证据与实验（D9–D12，Gate G3）
 

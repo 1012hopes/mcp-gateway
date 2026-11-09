@@ -112,8 +112,10 @@ class GatewayEndToEndTests(unittest.TestCase):
             self.assertIn(record["chosen"], record["offered"])
 
     def test_records_carry_versions_and_state(self):
+        from gateway.trace.record import CURRENT_SCHEMA_VERSION
+
         for record in self.records:
-            self.assertEqual(record["schema_version"], 1)
+            self.assertEqual(record["schema_version"], CURRENT_SCHEMA_VERSION)
             self.assertTrue(record["gateway_version"])
             self.assertTrue(record["rules_version"])
             self.assertEqual(record["state"], "RUNNING")

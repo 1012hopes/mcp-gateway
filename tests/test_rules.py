@@ -1,9 +1,9 @@
-"""D7: the two rules that can be decided without an evidence model.
+"""D7/D8: the rules that need no evidence model.
 
 These tests drive the rules directly with a hand-built ``StopContext``. That is
-deliberate: R1 and R3 are pure functions of a frozen snapshot, and a test that
-needed a subprocess to see whether "the same call twice" is a duplicate would be
-testing the harness. The end-to-end hit rate is asserted separately in
+deliberate: R1, R2 and R3 are pure functions of a frozen snapshot, and a test
+that needed a subprocess to see whether "the same call twice" is a duplicate
+would be testing the harness. The end-to-end hit rate is asserted separately in
 ``test_agent_e2e.py``, because "unit tests pass" and "the rule ever fires in a
 real run" are different claims and the plan calls out exactly that gap.
 """
@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from gateway.limits import Budget, CallSignature  # noqa: E402
-from gateway.rules import BudgetExhausted, DuplicateCall  # noqa: E402
+from gateway.rules import BudgetExhausted, DuplicateCall, NoProgress  # noqa: E402
 from gateway.stop import POST, PRE, StopContext, StopController  # noqa: E402
 
 
@@ -32,6 +32,8 @@ def ctx(
     budget=None,
     evidence=frozenset(),
     required=frozenset(),
+    state_trail=(),
+    state_hash=None,
 ):
     return StopContext(
         run_id="run-test",
@@ -44,6 +46,8 @@ def ctx(
         budget=budget or Budget(max_calls=24, max_wall_ms=0),
         calls_used=calls_used,
         wall_ms=wall_ms,
+        state_trail=tuple(state_trail),
+        state_hash=state_hash,
     )
 
 
@@ -135,12 +139,83 @@ class BudgetExhaustedTests(unittest.TestCase):
         )
 
 
+class NoProgressTests(unittest.TestCase):
+    rule = NoProgress()
+
+    def test_declares_the_post_stage(self):
+        # The question is whether the *answer* was new. Before forwarding there
+        # is no answer, so a pre-stage R2 could only compare questions.
+        self.assertEqual(self.rule.stage, POST)
+        self.assertEqual(self.rule.priority, 40)
+
+    def test_first_call_cannot_be_stagnation(self):
+        self.assertIsNone(self.rule.check(ctx(state_hash="h", state_trail=())))
+
+    def test_an_unchanged_state_halts(self):
+        verdict = self.rule.check(ctx(state_hash="hA", state_trail=("hA",)))
+
+        self.assertIsNotNone(verdict)
+        self.assertEqual(verdict.state, "HALTED_NO_PROGRESS")
+        self.assertEqual(verdict.decision, "halt_no_progress")
+        self.assertIn("hA", verdict.reason)
+
+    def test_a_new_piece_of_knowledge_resets_the_clock(self):
+        # Previous state differed: this call taught the run something, so no
+        # matter how many calls came before, it is not stagnation.
+        self.assertIsNone(
+            self.rule.check(ctx(state_hash="hB", state_trail=("hA", "hA", "hA")))
+        )
+
+    def test_only_the_tail_of_the_trail_is_compared(self):
+        # An old plateau must not poison a run that has since made progress.
+        self.assertIsNone(
+            self.rule.check(ctx(state_hash="hC", state_trail=("hA", "hA", "hB")))
+        )
+
+    def test_no_measurement_means_no_verdict(self):
+        # R2 must not guess. A context without a state hash (pre-stage, or a
+        # rule run out of order) gets no opinion rather than a fabricated one.
+        self.assertIsNone(self.rule.check(ctx(state_trail=("hA",), state_hash=None)))
+
+    def test_window_one_is_refused(self):
+        # One silent call is how an agent routes around a dead end; halting on it
+        # would stop healthy runs, and the mistake is invisible in the trace.
+        with self.assertRaises(ValueError):
+            NoProgress(window=1)
+
+    def test_a_wider_window_waits_for_that_many(self):
+        rule = NoProgress(window=3)
+        self.assertIsNone(rule.check(ctx(state_hash="hA", state_trail=("hA",))))
+        self.assertIsNone(rule.check(ctx(state_hash="hA", state_trail=("hX", "hA"))))
+        self.assertIsNotNone(rule.check(ctx(state_hash="hA", state_trail=("hA", "hA"))))
+
+
 class ControllerOrderTests(unittest.TestCase):
     def setUp(self):
         self.controller = StopController((BudgetExhausted(), DuplicateCall()))
 
     def test_version_names_the_installed_set(self):
         self.assertEqual(self.controller.version, "rules-v0(R1,R3)")
+
+    def test_the_installed_set_is_ordered_by_priority(self):
+        controller = StopController((BudgetExhausted(), NoProgress(), DuplicateCall()))
+        self.assertEqual(controller.names, ("R1", "R2", "R3"))
+        self.assertEqual(controller.version, "rules-v0(R1,R2,R3)")
+
+    def test_r2_wins_over_r3_when_both_would_fire(self):
+        # A run that is spinning at the moment the budget runs out: the honest
+        # verdict is "you were getting nowhere", not "you ran out of room".
+        # Priority 40 < 50 encodes that, and R3's docstring says why it is last.
+        controller = StopController((BudgetExhausted(), NoProgress(), DuplicateCall()))
+        snapshot = ctx(
+            state_hash="hA",
+            state_trail=("hA",),
+            calls_used=3,
+            budget=Budget(max_calls=3, max_wall_ms=0),
+        )
+        post = controller.evaluate(POST, snapshot)
+        self.assertEqual(post.verdict.rule, "R2")
+        self.assertEqual(post.attempted, ("R2",), "R3 is never reached")
 
     def test_r1_wins_when_both_would_fire(self):
         # Both conditions hold on the third call: a repeat, and the last unit of

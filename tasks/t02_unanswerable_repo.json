@@ -1,0 +1,7 @@
+{
+  "id": "t02",
+  "goal": "Find the unresolved incident that affects repo 'ghost/typo' and report its severity. The repo may not exist in the database; if it does not, say so.",
+  "required_evidence": [],
+  "max_turns": 11,
+  "policy": "futile_search"
+}

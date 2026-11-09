@@ -80,6 +80,10 @@ _BOOL_FIELDS = ("truncated",)
 
 _REQUIRED_BY_VERSION: Dict[int, Tuple[str, ...]] = {
     1: PAYLOAD_FIELDS_V1 + ("hash",),
+    # v2 adds no payload fields: ``stop_check.state_hash`` is optional, and a
+    # reader that demanded it would reject every v1 line it was written to keep
+    # verifying.
+    2: PAYLOAD_FIELDS_V1 + ("hash",),
 }
 
 _STOP_CHECK_REQUIRED = ("rule", "hit", "evidence", "missing", "attempted")
@@ -191,6 +195,8 @@ def _check_structure(
         return REASON_STOP_CHECK_INCOMPLETE, f"stop_check 缺少 {missing}"
     if not isinstance(stop_check["hit"], bool):
         return REASON_TYPE_ERROR, "stop_check.hit 应为 bool"
+    if "state_hash" in stop_check and not isinstance(stop_check["state_hash"], str):
+        return REASON_TYPE_ERROR, "stop_check.state_hash 应为 str（缺省表示未计算）"
 
     return None
 

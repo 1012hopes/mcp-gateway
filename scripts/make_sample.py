@@ -8,8 +8,12 @@ worth committing -- a reviewer can regenerate the file and diff it.
 
 The 12 steps tell the story the project is about: 3 steps were necessary, the
 other 9 were the same information re-fetched with different wording. Nothing
-here stops early -- the stop controller does not exist yet (D5-D8), so this is
-the *baseline*, and the number to beat is 12.
+here stops early -- this is the *baseline*, and the number to beat is 12.
+
+The sample is minted with the current schema version. It carries no
+``stop_check.state_hash`` because it models a run with no rules installed, i.e.
+nothing computed a state fingerprint; that key is optional in v2 precisely so a
+record can be honest about not having the measurement.
 """
 
 from __future__ import annotations

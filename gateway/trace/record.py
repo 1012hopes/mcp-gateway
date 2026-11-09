@@ -23,7 +23,16 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .canonical import canonical_bytes
 
-CURRENT_SCHEMA_VERSION = 1
+#: v2 adds one optional nested key, ``stop_check.state_hash`` (D8). The payload
+#: field list is unchanged, so a v1 reader sees a valid record plus one field it
+#: keeps verbatim in ``_extra`` -- and because the key is *omitted* when absent,
+#: a v1 line read and rewritten by this version is byte-identical.
+CURRENT_SCHEMA_VERSION = 2
+
+#: Versions this code can read. Writing is restricted to ``CURRENT``: old
+#: records must stay verifiable forever, new ones must never be minted with an
+#: old semantics.
+READABLE_SCHEMA_VERSIONS = (1, 2)
 
 #: Payload field order for schema version 1 (DESIGN 2.3). ``hash`` is not part
 #: of the payload -- it is the digest *of* the payload.
@@ -57,6 +66,11 @@ STOP_CHECK_FIELDS_V1: Tuple[str, ...] = (
     "missing",
     "attempted",
 )
+
+#: v2 adds ``state_hash``. Present only when a state was actually computed, so
+#: ``from_dict``/``to_dict`` round-trips a v1 record without inventing a key
+#: (inventing one would change the bytes and break the chain).
+STOP_CHECK_FIELDS_V2: Tuple[str, ...] = STOP_CHECK_FIELDS_V1 + ("state_hash",)
 
 #: DESIGN 2.5 state names.
 RUN_STATES = frozenset(
@@ -99,6 +113,11 @@ class StopCheck:
     ``attempted`` records every rule that was evaluated, in evaluation order.
     Without it, "why did *this* rule fire instead of another one" is
     unanswerable during replay -- which is exactly the question a reviewer asks.
+
+    ``state_hash`` (v2) is the run's information fingerprint *after* the call.
+    It is what R2 compares: two adjacent records with the same value are a run
+    that kept working and kept learning nothing. Storing it means the plateau is
+    visible in the file, not just inferable from the verdict.
     """
 
     rule: Optional[str] = None
@@ -106,27 +125,32 @@ class StopCheck:
     evidence: List[str] = field(default_factory=list)
     missing: List[str] = field(default_factory=list)
     attempted: List[str] = field(default_factory=list)
+    state_hash: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        body: Dict[str, Any] = {
             "rule": self.rule,
             "hit": self.hit,
             "evidence": list(self.evidence),
             "missing": list(self.missing),
             "attempted": list(self.attempted),
         }
+        if self.state_hash is not None:
+            body["state_hash"] = self.state_hash
+        return body
 
     @classmethod
     def from_dict(cls, data: Optional[Mapping[str, Any]]) -> "StopCheck":
         if not data:
             return cls()
-        unknown = {k: v for k, v in data.items() if k not in STOP_CHECK_FIELDS_V1}
+        unknown = {k: v for k, v in data.items() if k not in STOP_CHECK_FIELDS_V2}
         check = cls(
             rule=data.get("rule"),
             hit=bool(data.get("hit", False)),
             evidence=list(data.get("evidence") or []),
             missing=list(data.get("missing") or []),
             attempted=list(data.get("attempted") or []),
+            state_hash=data.get("state_hash"),
         )
         if unknown:
             # Keep unknown keys so the hash still covers them.
@@ -171,13 +195,14 @@ class TraceRecord:
             raise ValueError(f"turn must be >= 1, got {self.turn}")
         if self.latency_ms < 0:
             raise ValueError(f"latency_ms must be >= 0, got {self.latency_ms}")
-        if self.schema_version != CURRENT_SCHEMA_VERSION:
-            # Old records are read through their own version's field list; new
-            # code never writes an old version.
+        if self.schema_version not in READABLE_SCHEMA_VERSIONS:
             raise ValueError(
-                f"cannot write schema_version={self.schema_version}, "
-                f"current is {CURRENT_SCHEMA_VERSION}"
+                f"unsupported schema_version={self.schema_version}; "
+                f"readable: {READABLE_SCHEMA_VERSIONS}"
             )
+        # A version this code can *read* is not one it may *mint*: sealing an old
+        # version with new field semantics would produce a record that claims a
+        # schema it does not follow. Old versions stay readable, never writable.
         if self._extra and set(self._extra) & set(PAYLOAD_FIELDS_V1):
             raise ValueError("_extra must not shadow known fields")
 
@@ -235,6 +260,11 @@ class TraceRecord:
 
     def seal(self) -> "TraceRecord":
         """Fix ``hash``. Idempotent *only* if nothing changed in between."""
+        if self.schema_version != CURRENT_SCHEMA_VERSION:
+            raise ValueError(
+                f"refusing to seal schema_version={self.schema_version}; "
+                f"current is {CURRENT_SCHEMA_VERSION}"
+            )
         self.hash = self.compute_hash()
         return self
 

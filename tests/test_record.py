@@ -167,9 +167,40 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             make_record(latency_ms=-1)
 
-    def test_writing_an_old_schema_version_is_rejected(self):
+    def test_sealing_an_old_schema_version_is_rejected(self):
+        # Readable is not writable: an old version may still be verified, never
+        # minted, or a record would claim a schema its fields do not follow.
+        record = make_record()
+        record.schema_version = CURRENT_SCHEMA_VERSION - 1
         with self.assertRaises(ValueError):
-            make_record(schema_version=CURRENT_SCHEMA_VERSION - 1)
+            record.seal()
+
+    def test_a_v1_record_still_verifies(self):
+        """The old format must stay verifiable after the v2 field was added.
+
+        Built by hand from a v2 payload minus the optional key: that is exactly
+        what a v1 file looks like on disk, and re-serializing it must reproduce
+        the same bytes (otherwise ``verify`` would report a hash mismatch on a
+        record nobody touched).
+        """
+        from gateway.trace.verify import record_hash
+
+        current = make_record().to_dict()
+        v1 = {k: v for k, v in current.items() if k != "hash"}
+        v1["schema_version"] = 1
+        v1["hash"] = record_hash(v1)
+
+        rebuilt = TraceRecord.from_dict(v1).to_dict()
+        self.assertEqual(rebuilt, v1)
+        self.assertEqual(record_hash(rebuilt), v1["hash"])
+        self.assertNotIn("state_hash", rebuilt["stop_check"])
+
+    def test_state_hash_is_omitted_when_not_measured(self):
+        # A missing measurement must not be encoded as null: the key's presence
+        # is the difference between "the state did not change" and "nobody looked".
+        self.assertNotIn("state_hash", make_record().to_dict()["stop_check"])
+        measured = make_record(stop_check=StopCheck(hit=False, state_hash="c" * 64))
+        self.assertEqual(measured.to_dict()["stop_check"]["state_hash"], "c" * 64)
 
     def test_empty_run_id_has_no_genesis(self):
         with self.assertRaises(ValueError):

@@ -360,17 +360,24 @@ ToolRecord
   doc             str           # 检索用文档：name + description + tags
   danger          bool          # 是否不可逆动作
 
-TraceRecord（一行一个 JSON）
+TraceRecord（一行一个 JSON，**只增不改**，见 2.8）
   seq             int
   run_id          str
+  parent_run_id   str | null    # FR-12 追问继承时的父 run，首轮为 null
+  session_id      str           # 会话标识（A3 多会话隔离的预留位）
   turn            int           # 第几轮 LLM 调用
+  model_id        str           # 产生该决策的模型标识（换模型后分组统计用）
+  gateway_version str           # 网关语义化版本，跨版本重放校验
+  rules_version   str           # 规则集版本，A5 重放的前提
   offered         [str]         # 本轮暴露给模型的工具（必录，否则选择不可评估）
   chosen          str | null
   args_hash       str           # 归一化参数哈希（算法 A2.1）
   result_digest   str           # 上游结果摘要（不存全文，避免泄密）
+  truncated       bool          # 结果是否被截断（影响证据完备判定，见 2.6）
   evidence_added  [str]         # 本次调用新增的证据类型
   stop_check      {rule, hit, evidence[], missing[]}
   decision        str           # forward | block_duplicate | halt_complete | ...
+  state           str           # RUNNING | HALTED_* | DEGRADED（2.5 状态机快照）
   latency_ms      int
   prev_hash       str
   hash            str
@@ -497,6 +504,55 @@ RUNNING
 - 不做 WebSocket 实时流 —— 跑完渲染静态页，才符合"离线可验证"
 - 不把 offered set 画成饼图 / 词云 —— 装饰，不承担论证
 - 不为了 UI 改数据结构 —— **UI 只读 trace，不产生任何新数据**（这条是硬线，否则证据链会被 UI 污染）
+
+### 2.8 扩展性评估与唯一的不可逆决策
+
+判断扩展性不该问"能不能变大"，该问"**改一件事要动几处**"。按改动成本分四档：
+
+| 档 | 可扩展的维度 | 改动量 |
+|---|---|---|
+| 配置级 | 新上游 server、新证据类型（`ev_type`）、新指标、任务集扩容 | 改 yaml / json，不动代码 |
+| 加一个文件 | 新终止规则、新传输适配器、新 fake server、新 checker | 新增模块，不改既有逻辑 |
+| 小重构（1–2 天） | 多 run 并发（证据集从进程级单例改为 per-run `Session` 对象）、多会话隔离 | 改对象生命周期 |
+| 架构级（>1 周） | 开放任务族（须改学习式）、从"判定"扩展到"规划"、多租户权限 | 换产品，不是改代码 |
+
+**横向扩展好，是因为领域知识被隔离在唯一一个文件里**：`config/evidence.json`。网关本身只认识 `ev_type` 这个抽象，不认识"仓库""SQL""法规"。**领域相关性集中在一处，是扩展性的核心指标**——换领域只换配置，不动引擎。
+
+**纵向扩展差，是当初的取舍**：`A3 单用户单 run 串行`。证据集目前是进程级状态，要支持并发必须先把 `Session` 提成一等公民。不是难点，但会牵动 stop / evidence / trace 三个模块。
+
+#### 唯一的不可逆决策：TraceRecord 的字段集合
+
+哈希链的价值在于**旧记录永不改变**。反过来说：**任何事后追加的字段都会让新旧轨迹不可比，而可比性正是指标的基础。**
+
+所以 `TraceRecord` 是整个项目里唯一"现在不定就废掉"的设计。以下 7 个字段必须第一天进 schema，哪怕暂时恒为 `null`：
+
+| 字段 | 为什么不能后加 |
+|---|---|
+| `gateway_version` | 跨版本重放校验；后加则旧 trace 无法判定归属版本 |
+| `rules_version` | A5 重放的前提；后加则旧数据无法重放 |
+| `model_id` | 换模型需分组统计；后加则前期数据作废 |
+| `session_id` | A3 多会话隔离；后加则无法回溯区分 |
+| `parent_run_id` | FR-12 追问继承；后加则继承关系永久丢失 |
+| `truncated` | 2.6 截断标记；后加则历史"证据完备"判定不可信 |
+| `state` | 2.5 状态机快照；后加则无法复盘 DEGRADED |
+
+**规则：TraceRecord 只增不改。** 字段语义变更必须提升 `gateway_version` 并写入 changelog——这条规则本身就是"可验证"的一部分。
+
+#### 一处现在就该做的低成本改进：规则改 priority 数值
+
+当前优先级硬编码 `R5 > R1 > R4 > R2 > R3`。改成每条规则自带 `priority: int`、按数值排序执行，插入新规则不必改级联代码。
+
+成本约 20 行。收益：**这是最可能被扩展的部分**（新判据比新上游更常见）。不做的话，以后插入规则就要动核心判定逻辑——而那正是最不该动的地方。
+
+#### 一个被低估的复用方向
+
+判据与领域解耦，`evidence.json` 是唯一领域相关物。同一个机制可以直接搬到：
+
+- RAG 检索终止（`required = {相关段落, 权威来源}` → 够了就别再检索）
+- 多轮问答收敛（`required` 随问题类型变化）
+- 爬虫/采集收敛（`required = {入口页, 详情页, 翻页终点}`）
+
+这是"扩展性"里真正值钱的部分：**换场景不改引擎，只换一份配置**。
 
 ---
 

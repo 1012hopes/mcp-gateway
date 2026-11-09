@@ -143,6 +143,7 @@
 | FR-16 | 并发 `tool_calls` 首版强制串行，轨迹线性写入，避免证据集竞态 | P1 | 一次返回 3 个调用时逐个执行 |
 | FR-17 | 仅只读工具允许重试；`danger: true` 的工具超时不重试 | P1 | 写操作超时不产生重复副作用 |
 | FR-18 | `--doctor` 自检：上游连通性、schema 漂移、配置合法性、规则版本 | P2 | 一条命令给出可读诊断 |
+| FR-19 | **扩展点契约**：S1–S4 四个场景（加上游 / 加判据 / 换领域 / 换存储）均不改核心模块 | P1 | `git diff --name-only` 落在约定文件集内 |
 
 ### 1.2 非功能需求
 
@@ -192,10 +193,10 @@
 
 | 块 | 覆盖 | 估时 |
 |---|---|---|
-| 骨架：代理 + 命名空间 + 哈希链 + verify | FR-1/2/5 | 4 天 |
+| 骨架：代理 + 命名空间 + Session + 规则注册表 + 哈希链 + verify | FR-1/2/5 | 5 天 |
 | 判定：四级判据 + 证据集 + 归一化 + run 边界 | FR-3/4/12/14 | 4 天 |
 | 实验：20 任务 + checker + 指标 | FR-7 | 3 天 |
-| 包装：准入 + 回放视图 + README | A1 + FR-11 | 3 天 |
+| 包装：准入 + 回放视图 + README | A1 + FR-11 | 2 天 |
 | 兼容性：三个 fake server + 协议层 | 2.6 | 1 天 |
 | **合计** | | **15 天** |
 
@@ -267,6 +268,7 @@
 | FR-7 | `metrics.py` `scripts/experiment.py` | 一条命令 | 对照表 + 图 |
 | FR-14 | `policy.py`（redact） | 换 token 对比 | 测试用例 |
 | FR-11 | `render.py` | 浏览器打开 | `trace.html` |
+| FR-19 | 全部模块边界 | `git diff --name-only` 四场景 | 扩展性验收记录 |
 
 **规则**：任何 FR 若在矩阵里找不到"验证手段"，说明它不可验收，必须重写或降级。
 
@@ -324,30 +326,46 @@ Agent (LLM client)
 ```
 mcp-gateway/
 ├── gateway/
-│   ├── __main__.py      # stdio 入口，装配依赖
-│   ├── transport.py     # MCP server 侧：list / call 的分发
+│   ├── __main__.py      # ★ 唯一装配点：所有具体实现只在这里 import
+│   ├── session.py       # ★ 会话上下文：证据集 / 预算 / offered 历史 / trace 绑定
+│   ├── transport.py     # MCP server 侧：list / call 分发
 │   ├── upstream.py      # MCP client 池：连接、健康检查、超时、重试
 │   ├── registry.py      # 工具聚合、命名空间、schema 归一与冲突检测
-│   ├── selector.py      # 工具准入（算法 A1）
-│   ├── stop.py          # 终止判定（算法 A2）
-│   ├── evidence.py      # 证据集建模与抽取（算法 A3）
-│   ├── trace.py         # 哈希链写入 + verify（算法 A4）
-│   ├── replay.py        # 确定性重放（算法 A5）
+│   ├── selector.py      # 工具准入（A1）
+│   ├── rules/
+│   │   ├── base.py      # ★ Rule 协议 + 注册表（按 priority 排序）
+│   │   ├── danger.py    # R5
+│   │   ├── duplicate.py # R1
+│   │   ├── complete.py  # R4
+│   │   ├── progress.py  # R2
+│   │   └── budget.py    # R3
+│   ├── stop.py          # ★ 只做编排：排序、短路、断言，不含具体判据
+│   ├── evidence.py      # 证据集 + 抽取器注册
+│   ├── extractors/      # ★ ev_type → 纯函数，一类型一文件
+│   ├── trace/
+│   │   ├── record.py    # ★ TraceRecord + schema 版本与演进
+│   │   ├── sink.py      # ★ TraceSink 接口：jsonl / sqlite / memory
+│   │   └── verify.py    # ★ 版本化校验
+│   ├── replay.py        # 确定性重放（A5）
 │   ├── policy.py        # 白名单 / 预算 / 审批 / 脱敏
-│   └── metrics.py       # 指标计算（算法 A6）
-├── mcp_servers/
-│   ├── sqlite_server.py # 自写上游：真实可写的第二个 server
-│   └── wiki_server.py   # 上游：wiki.search / wiki.read（异构工具样本）
-├── tasks/               # 20 条任务定义 YAML + checker 代码
+│   └── metrics.py       # 指标计算（A6）
+├── mcp_servers/         # 自写上游：sqlite / wiki / 三个 fake
+├── tasks/               # 20 条任务 + checker + good/bad 样本
 ├── config/
-│   ├── gateway.yaml     # 上游列表、K、预算、白名单
-│   └── evidence.json    # 冻结的证据模型（由离线层产出）
+│   ├── gateway.yaml     # 上游、K、预算
+│   ├── rules.yaml       # ★ 规则开关与参数（w=2 等）
+│   └── evidence.json    # 冻结的证据模型
 ├── traces/              # 运行产物
 ├── scripts/
 │   ├── experiment.py    # 基线/网关对照
 │   └── freeze_evidence.py
 └── DESIGN.md
 ```
+
+两个结构性约束（比目录本身重要）：
+
+1. **`__main__.py` 是唯一装配点**。除它之外，任何模块不得 import 具体实现，只能依赖接口。这是"可插拔"的结构前提，违反一次就会产生隐式耦合。
+2. **`stop.py` 不含判据**。它只负责排序、调用、短路、产断言。所有具体规则在 `rules/`。这条如果不守，加第二条判据时就会去改 `stop.py`，扩展性当场失效。
 
 ### 2.3 数据模型
 
@@ -360,7 +378,8 @@ ToolRecord
   doc             str           # 检索用文档：name + description + tags
   danger          bool          # 是否不可逆动作
 
-TraceRecord（一行一个 JSON，**只增不改**，见 2.8）
+TraceRecord（一行一个 JSON，**哈希覆盖全字节 + 版本解释语义**，见 2.8）
+  schema_version  int           # 记录结构版本；verify 按它选校验器
   seq             int
   run_id          str
   parent_run_id   str | null    # FR-12 追问继承时的父 run，首轮为 null
@@ -383,6 +402,19 @@ TraceRecord（一行一个 JSON，**只增不改**，见 2.8）
   hash            str
 ```
 
+#### schema 演进规则（把"不可逆"化解为"可版本化"）
+
+上一版判断"字段集合是唯一不可逆决策"。可以用一条原则化解：
+
+> **不可变的应该是字节，不是 schema。哈希保护字节，版本号解释语义。**
+
+1. `hash` 覆盖 canonical JSON 的**全部字段**（含未来新增与未知字段）——任何字节改动必然被检出
+2. `verify` 按记录的 `schema_version` 选择校验器，只检查**该版本的必需字段是否存在**，不检查"是否存在额外字段"
+3. 新增字段 → 提升 `schema_version`，旧记录用旧校验器校验，**仍然通过**
+4. 禁止修改已有字段的语义 → 只能新增字段名，旧字段标 `deprecated` 并保留一个版本周期
+
+代价：`verify` 需维护多版本字段清单（每版本约 10 行）。收益：**链永久可验，schema 可持续演进**——这才是"扩展性好"在不可变数据上的正确解法。
+
 ```text
 EvidenceSpec（冻结产物，来自离线层）
   task_family     str
@@ -402,6 +434,8 @@ EvidenceSpec（冻结产物，来自离线层）
 7. 写 TraceRecord（含哈希）→ 返回结果 + 断言
 
 顺序不可交换：安全在最先，主动收束在被动兜底之前。
+
+以上 7 步全部在 `Session` 上下文内执行（证据集 / 预算 / offered 历史 / trace 绑定），网关进程本身不持有会话状态——这是多 run 并发的前提（见 2.8）。
 
 ### 2.5 单次运行的状态机
 
@@ -505,7 +539,7 @@ RUNNING
 - 不把 offered set 画成饼图 / 词云 —— 装饰，不承担论证
 - 不为了 UI 改数据结构 —— **UI 只读 trace，不产生任何新数据**（这条是硬线，否则证据链会被 UI 污染）
 
-### 2.8 扩展性评估与唯一的不可逆决策
+### 2.8 扩展性：契约与验收
 
 判断扩展性不该问"能不能变大"，该问"**改一件事要动几处**"。按改动成本分四档：
 
@@ -513,18 +547,49 @@ RUNNING
 |---|---|---|
 | 配置级 | 新上游 server、新证据类型（`ev_type`）、新指标、任务集扩容 | 改 yaml / json，不动代码 |
 | 加一个文件 | 新终止规则、新传输适配器、新 fake server、新 checker | 新增模块，不改既有逻辑 |
-| 小重构（1–2 天） | 多 run 并发（证据集从进程级单例改为 per-run `Session` 对象）、多会话隔离 | 改对象生命周期 |
+| 小重构（0.5 天） | 多 run 并发：`Session` 已是一等公民，只需把内存实现换成持久化实现 | 只换 `SessionStore` |
 | 架构级（>1 周） | 开放任务族（须改学习式）、从"判定"扩展到"规划"、多租户权限 | 换产品，不是改代码 |
 
 **横向扩展好，是因为领域知识被隔离在唯一一个文件里**：`config/evidence.json`。网关本身只认识 `ev_type` 这个抽象，不认识"仓库""SQL""法规"。**领域相关性集中在一处，是扩展性的核心指标**——换领域只换配置，不动引擎。
 
-**纵向扩展差，是当初的取舍**：`A3 单用户单 run 串行`。证据集目前是进程级状态，要支持并发必须先把 `Session` 提成一等公民。不是难点，但会牵动 stop / evidence / trace 三个模块。
+**纵向扩展已不再是短板**：`Session` 提成一等公民（`gateway/session.py`），证据集、预算、offered 历史、trace 绑定全部挂在会话上，网关本身无状态。这一步把"多并发"从架构级降到 0.5 天，代价只是多一层对象。
 
-#### 唯一的不可逆决策：TraceRecord 的字段集合
+#### 七个扩展点契约
+
+| # | 扩展点 | 契约 | 新增一个要改 | 约束 |
+|---|---|---|---|---|
+| EP-1 | 上游 server | 实现 MCP 协议 | `gateway.yaml` 加 1 行 | 无 |
+| EP-2 | 终止规则 | `name` / `priority` / `check(ctx) -> Decision\|None` | `rules/xxx.py` + `rules.yaml` 登记 | O(1)、无副作用、必须声明 priority |
+| EP-3 | 证据类型 | `ev_type` + `extractor(result) -> bool` | `extractors/xxx.py` + `evidence.json` 一行 | extractor 必须是**纯函数**（否则重放不成立） |
+| EP-4 | 传输 | `connect` / `list` / `call` / `close` | 新增适配器文件 | 不得向上层泄漏协议细节 |
+| EP-5 | 轨迹存储 | `TraceSink.append(record)` / `read(run_id)` | 新增 sink 实现 | **持久化成功后才返回**（FR-13 的前提） |
+| EP-6 | 会话存储 | `SessionStore.load/save` | 新增实现 | 单 run 内单调，不要求跨进程一致 |
+| EP-7 | 领域 | 一份 `evidence.json` + `tasks/` | 换文件，不动代码 | 任务族必须可枚举（A2） |
+
+**结构前提**：`__main__.py` 是唯一装配点。除它之外任何模块不得 import 具体实现，只能依赖接口。**违反一次，可插拔就失效**——隐式耦合不会立刻报错，只会在第二次扩展时暴露。
+
+#### 扩展性验收（用 `git diff` 判定，不靠自评）
+
+| 场景 | 判定标准 |
+|---|---|
+| S1 加一个新上游 server | 只改 yaml；`git diff --name-only` 不含 `gateway/` |
+| S2 加一个新判据（如"连续 3 次结果为空"） | 新增 1 个文件 + 1 行配置；`stop.py` **零改动** |
+| S3 换一个领域（如法规检索） | 只改 `evidence.json` + `tasks/`；`gateway/` 零改动 |
+| S4 换存储（JSONL → SQLite） | 只加一个 sink 文件；调用方零改动 |
+
+**反向验收**：任何一次改动都必须能用上面某个场景解释；解释不了的改动，说明边界没划清，**先改契约再改代码**。
+
+#### 曾经的唯一不可逆点，以及它怎么被化解
 
 哈希链的价值在于**旧记录永不改变**。反过来说：**任何事后追加的字段都会让新旧轨迹不可比，而可比性正是指标的基础。**
 
-所以 `TraceRecord` 是整个项目里唯一"现在不定就废掉"的设计。以下 7 个字段必须第一天进 schema，哪怕暂时恒为 `null`：
+上一版的结论是：字段集合必须第一天定死。判断是对的，**解法错了**——真正的解法是 2.3 的 schema 演进规则（哈希覆盖全字节、版本号解释语义、校验只查必需字段）。加字段不再废掉旧链，只多一份版本清单。
+
+> **不可变的是字节，不是 schema。**
+
+这一条把架构里唯一的硬约束，降级成了常规的版本管理问题。
+
+以下 7 个字段仍建议预留（成本 0，恒为 `null`），理由是版本切换有余量成本——每多一个 `schema_version`，`verify` 就多一份字段清单要维护。**能一次到位的，别靠兼容兜底。**
 
 | 字段 | 为什么不能后加 |
 |---|---|
@@ -536,13 +601,11 @@ RUNNING
 | `truncated` | 2.6 截断标记；后加则历史"证据完备"判定不可信 |
 | `state` | 2.5 状态机快照；后加则无法复盘 DEGRADED |
 
-**规则：TraceRecord 只增不改。** 字段语义变更必须提升 `gateway_version` 并写入 changelog——这条规则本身就是"可验证"的一部分。
+**规则：TraceRecord 只增字段名，不改语义。** 语义要变就新增字段 + 旧字段标 `deprecated` + 提升 `schema_version`——这条规则本身就是"可验证"的一部分。
 
-#### 一处现在就该做的低成本改进：规则改 priority 数值
+#### 规则优先级数值化（已在 A2 落实）
 
-当前优先级硬编码 `R5 > R1 > R4 > R2 > R3`。改成每条规则自带 `priority: int`、按数值排序执行，插入新规则不必改级联代码。
-
-成本约 20 行。收益：**这是最可能被扩展的部分**（新判据比新上游更常见）。不做的话，以后插入规则就要动核心判定逻辑——而那正是最不该动的地方。
+硬编码 `R5 > R1 > R4 > R2 > R3` 已改成 `priority: int` + 排序执行，间隔取 10。成本约 20 行，收益是**新判据比新上游更常见**——不做的话，每次加规则都要动核心判定逻辑，而那正是最不该动的地方。详见 A2。
 
 #### 一个被低估的复用方向
 
@@ -590,17 +653,26 @@ RUNNING
 S_t = (tool_t, args_hash_t, result_digest_t, Evidence_t, budget_used_t)
 ```
 
-按优先级级联执行规则，首个命中者即为决策。
+按 priority 排序后依次执行，首个命中者即为决策。**规则以注册表实现，`stop.py` 不含任何具体判据。**
 
-**优先级：R5 > R1 > R4 > R2 > R3**
+```python
+class Rule(Protocol):
+    name: str
+    priority: int                                  # 数值小者先执行
+    def check(self, ctx: SessionContext) -> Decision | None: ...
+```
 
-| 规则 | 条件 | 决策 | 优先级理由 |
-|---|---|---|---|
-| R5 危险动作 | `tool ∈ dangerous` | WAITING_APPROVAL | 安全绝对优先，且必须在"证据完备"之前判，否则可能带着未授权动作收束 |
-| R1 重复调用 | ∃i<t: `tool_i=tool_t ∧ args_hash_i=args_hash_t` | HALT_DUPLICATE，回填上次结果 | 零成本可判，先砍掉最明显的浪费 |
-| R4 证据完备 | `required ⊆ Evidence_t` | HALT_COMPLETE | 主动收束，必须早于 R2，否则"本可以早停"会被误记成"打转" |
-| R2 无进展 | `state_hash` 连续 w=2 轮相同 | HALT_NO_PROGRESS | 被动兜底，抓伪进展 |
-| R3 预算 | calls > C_max ∨ tokens > T_max ∨ wall > W_max | HALT_BUDGET | 最后一道保险 |
+`stop.py` 只有四件事：排序、依次调用、返回首个非 `None`、把**试过的全部规则**写入 `stop_check.attempted`。最后一项不是可选项——"为什么不是别的规则停的"在复盘时必被问到，没有 `attempted` 就无法回答。
+
+优先级间隔取 10，空出 15 / 25 / 35，插入新规则不必重排：
+
+| priority | 规则 | 条件 | 决策 | 为什么在这个位置 |
+|---|---|---|---|---|
+| 10 | R5 危险动作 | `tool ∈ dangerous` | WAITING_APPROVAL | 安全绝对优先，且必须早于证据完备，否则可能带着未授权动作收束 |
+| 20 | R1 重复调用 | ∃i<t: `tool_i=tool_t ∧ args_hash_i=args_hash_t` | HALT_DUPLICATE，回填上次结果 | 零成本可判，先砍最明显的浪费 |
+| 30 | R4 证据完备 | `required ⊆ Evidence_t` | HALT_COMPLETE | 主动收束，必须早于 R2，否则"本可以早停"会被误记成"打转" |
+| 40 | R2 无进展 | `state_hash` 连续 w=2 轮相同 | HALT_NO_PROGRESS | 被动兜底，抓伪进展 |
+| 50 | R3 预算 | `calls > C_max ∨ tokens > T_max ∨ wall > W_max` | HALT_BUDGET | 最后一道保险 |
 
 **R2 的状态哈希**：
 
@@ -671,6 +743,17 @@ hash_0 = H(run_id)
 ```
 
 **verify**：从头重算全部哈希，首个不匹配处即被篡改或被插入/删除的位置。O(n)，n < 1000，无需 Merkle。
+
+校验分两层，**顺序不能反**：
+
+| 层 | 检查 | 失败含义 |
+|---|---|---|
+| L1 完整性 | 重算 `hash_i`，与记录中的 `hash` 比对 | 字节被改过 / 中间被插入或删除 |
+| L2 结构 | 按该记录 `schema_version` 取字段清单，检查**必需字段是否存在**，忽略未知字段 | 记录不是该版本产出的（或被人为降级） |
+
+先 L1 后 L2 的理由：字段缺失本身就是一种 byte 改动，L1 会先报出来。反过来先跑 L2 会把"被删了一个字段"误报成"版本不匹配"，掩盖真正的篡改。
+
+L2 只做"必需字段存在性"检查，**不检查多余字段**——这正是 schema 可以向前演进而不废掉旧链的原因（见 2.3 演进规则）。
 
 **三级保证**：
 

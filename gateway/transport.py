@@ -1,7 +1,7 @@
 """The gateway as an MCP server: the single choke point between agent and tools.
 
 Everything the project claims depends on this file being the *only* way a tool
-gets called. Three consequences, in order of how easy they are to get wrong:
+gets called. Four consequences, in order of how easy they are to get wrong:
 
 1. **Nothing is written to stdout except protocol messages.** A stray ``print``
    corrupts the JSON-RPC stream and the failure looks like a hung client, not
@@ -17,6 +17,12 @@ gets called. Three consequences, in order of how easy they are to get wrong:
    chosen" has no denominator -- Accuracy@K is uncomputable (DESIGN 2.4). The
    registry decides membership, so ``offered`` is exactly what ``tools/list``
    returned; D14 will shrink it by gating and the field keeps its meaning.
+
+4. **The seven lifecycle steps are ordered, not merged.** Pre-stage guards (R5
+   safety, R1 duplicate) run before the upstream is touched; post-stage guards
+   (R4 completeness, R2 progress, R3 budget) run after, because they need the new
+   evidence. Swapping either pair does not raise -- it just makes the numbers
+   quietly wrong, which is why D6 wires the stages before any rule exists.
 
 Handlers are plain methods rather than closures so that the fail-closed path can
 be driven in-process by tests and by ``scripts/failclosed_demo.py`` without a
@@ -36,10 +42,12 @@ from mcp.server.stdio import stdio_server
 
 from .config import GatewayConfig
 from .registry import Registry, ToolEntry, build_registry
-from .session import MAX_RESULT_BYTES, RunSession
+from .session import MAX_RESULT_BYTES, RunSession, extract_evidence
+from .stop import POST, PRE, StopContext, StopController, StopVerdict, merge_checks
 from .trace.sink import TraceChainError, TraceWriteError
 from .upstream import StdioUpstream, UpstreamFailure, tail_of_exception
 from .version import GATEWAY_VERSION
+from .wire import KIND_CLOSED, KIND_HALT, format_notice
 
 __all__ = ["Gateway", "result_payload", "text_result", "error_result"]
 
@@ -59,6 +67,15 @@ def error_result(message: str) -> types.CallToolResult:
     return text_result(message, is_error=True)
 
 
+class _Blocked(Exception):
+    """The gateway refused before forwarding. Carries the decision name."""
+
+    def __init__(self, decision: str, reason: str) -> None:
+        super().__init__(reason)
+        self.decision = decision
+        self.reason = reason
+
+
 class Gateway:
     """Aggregates upstreams and records every call. One per run."""
 
@@ -68,12 +85,18 @@ class Gateway:
         upstreams: Sequence[StdioUpstream],
         session: RunSession,
         *,
+        controller: Optional[StopController] = None,
         baseline: Optional[Mapping[str, str]] = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.config = config
         self.upstreams = list(upstreams)
         self.session = session
+        self.controller = controller or StopController(())
+        # The stamp in the trace must come from the rules *actually installed*,
+        # not from a constant: a trace claiming rules-v0(none) while two rules
+        # were running is worse than no stamp at all.
+        self.session.rules_version = self.controller.version
         self._clock = clock
         self._baseline = baseline
         self._registry: Optional[Registry] = None
@@ -113,64 +136,111 @@ class Gateway:
         registry = await self.registry()
         return types.ListToolsResult(tools=[entry.to_mcp() for entry in registry.offered])
 
+    def stop_context(self, tool: str, args_hash: str) -> StopContext:
+        """Snapshot the run for a rule. Built here so rules never see the session."""
+        session = self.session
+        return StopContext(
+            run_id=session.run_id,
+            turn=session.turn,
+            tool=tool,
+            args_hash=args_hash,
+            evidence=frozenset(session.evidence),
+            required=frozenset(session.required),
+            history=tuple(session.history),
+            budget=session.budget,
+            calls_used=session.records_written,
+            wall_ms=session.wall_ms(),
+        )
+
+    def _refuse(self, session: RunSession) -> types.CallToolResult:
+        reason = session.abort_reason if session.aborted else session.halt_reason
+        label = "run aborted" if session.aborted else f"run {session.state.lower()}"
+        notice = format_notice(
+            KIND_CLOSED, state=session.state, rule=session.halt_rule or "-", reason=reason or ""
+        )
+        return error_result(
+            f"{label} ({reason}); no further calls are accepted\n{notice}"
+        )
+
     async def handle_call_tool(
         self, ctx: Any, params: types.CallToolRequestParams
     ) -> types.CallToolResult:
         session = self.session
         session.calls_attempted += 1
 
-        if session.aborted:
-            # The run is already dead. Refusing here is what stops an agent from
+        if session.closed:
+            # The run is already over. Refusing here is what stops an agent from
             # continuing on evidence that was never written down.
-            return error_result(
-                f"run aborted ({session.abort_reason}); no further calls are accepted"
-            )
+            return self._refuse(session)
 
         registry = await self.registry()
         chosen = params.name
         offered = registry.offered_names()
         entry = registry.get(chosen)
+        args = dict(params.arguments or {})
+        signature = session.proposed_signature(chosen, args)
         started = self._clock()
-        decision = "forward"
 
-        try:
-            if entry is None:
-                decision = "block_unknown_tool"
-                raise UpstreamFailure(
-                    f"unknown tool {chosen!r}; offered: {', '.join(offered) or '(none)'}"
+        decision = "forward"
+        attempted: List[str] = []
+        verdict: Optional[StopVerdict] = None
+        evidence_added: List[str] = []
+
+        # -- steps 2-3: pre-stage guards ----------------------------------
+        pre = self.controller.evaluate(PRE, self.stop_context(chosen, signature.args_hash))
+        attempted.extend(pre.attempted)
+
+        if pre.verdict is not None:
+            # A pre-stage verdict means the call must not reach the upstream at
+            # all. That is the whole reason these rules run first.
+            verdict = pre.verdict
+            decision = verdict.decision
+            session.halt(verdict.state, rule=verdict.rule, reason=verdict.reason)
+            response = error_result(
+                format_notice(
+                    KIND_HALT,
+                    state=verdict.state,
+                    decision=verdict.decision,
+                    rule=verdict.rule,
+                    reason=verdict.reason,
                 )
-            if entry.frozen:
-                # The upstream changed its contract since the baseline was
-                # frozen. Serving it would put incomparable traces in the same
-                # file; refusing keeps the comparison honest (DESIGN 2.6 pitfall 3).
-                decision = "block_schema_drift"
-                raise UpstreamFailure(
-                    f"{chosen} is frozen: {entry.drift}. Re-freeze the baseline "
-                    f"only after deciding the old traces stay comparable."
-                )
-            result = await self._by_upstream[entry.upstream].call_tool(
-                entry.original_name, params.arguments
             )
-            payload = result_payload(result)
-            is_error = bool(result.is_error)
-            response = result
-        except UpstreamFailure as exc:
-            payload = {"error": tail_of_exception(exc)}
-            is_error = True
-            response = error_result(f"{chosen} failed: {exc}")
+            payload: Dict[str, Any] = {"blocked": verdict.reason}
+        else:
+            response, payload, forwarded_decision = await self._forward(
+                entry, chosen, offered, args
+            )
+            decision = forwarded_decision
+
+            # -- steps 5-6: evidence, then post-stage guards ---------------
+            evidence_added = session.add_evidence(extract_evidence(payload))
+            post = self.controller.evaluate(POST, self.stop_context(chosen, signature.args_hash))
+            attempted.extend(post.attempted)
+            if post.verdict is not None:
+                verdict = post.verdict
+                decision = verdict.decision
+                session.halt(verdict.state, rule=verdict.rule, reason=verdict.reason)
 
         latency_ms = int((self._clock() - started) * 1000)
         truncated = len(repr(payload)) > MAX_RESULT_BYTES
+        check = merge_checks(
+            verdict=verdict,
+            attempted=attempted,
+            evidence=session.evidence,
+            missing=session.missing,
+        )
 
         try:
             session.record_call(
                 offered=offered,
                 chosen=chosen,
-                args=dict(params.arguments or {}),
+                args=args,
                 result=payload,
                 latency_ms=latency_ms,
                 decision=decision,
                 state=session.state,
+                evidence_added=evidence_added,
+                stop_check=check,
                 truncated=truncated,
             )
         except (TraceWriteError, TraceChainError) as exc:
@@ -182,9 +252,69 @@ class Gateway:
                 "(fail-closed)"
             )
 
+        # -- step 7b: deliver, with the halt notice attached ----------------
+        if session.halted and verdict is not None:
+            # Appended *after* the digest: the notice is gateway metadata, not
+            # upstream data. Digesting it would make the same upstream answer
+            # hash differently depending on the gateway's decision.
+            response.content.append(
+                types.TextContent(
+                    type="text",
+                    text=format_notice(
+                        KIND_HALT,
+                        state=session.state,
+                        decision=verdict.decision,
+                        rule=verdict.rule,
+                        reason=verdict.reason,
+                    ),
+                )
+            )
+
         session.mark_delivered()
         session.turn += 1
         return response
+
+    async def _forward(
+        self,
+        entry: Optional[ToolEntry],
+        chosen: str,
+        offered: Sequence[str],
+        args: Mapping[str, Any],
+    ) -> tuple[types.CallToolResult, Dict[str, Any], str]:
+        """Steps 4-5: the only place an upstream is actually called."""
+        try:
+            if entry is None:
+                raise _Blocked(
+                    "block_unknown_tool",
+                    f"unknown tool {chosen!r}; offered: {', '.join(offered) or '(none)'}",
+                )
+            if entry.frozen:
+                # The upstream changed its contract since the baseline was
+                # frozen. Serving it would put incomparable traces in the same
+                # file; refusing keeps the comparison honest (DESIGN 2.6 pitfall 3).
+                raise _Blocked(
+                    "block_schema_drift",
+                    f"{chosen} is frozen: {entry.drift}. Re-freeze the baseline "
+                    f"only after deciding the old traces stay comparable.",
+                )
+            result = await self._by_upstream[entry.upstream].call_tool(
+                entry.original_name, args
+            )
+            return result, result_payload(result), "forward"
+        except _Blocked as blocked:
+            # Not an upstream failure: the gateway refused before forwarding.
+            # Recorded like any other call so the refusal is auditable.
+            return (
+                error_result(f"{chosen} failed: {blocked.reason}"),
+                {"error": blocked.reason, "decision": blocked.decision},
+                blocked.decision,
+            )
+        except UpstreamFailure as exc:
+            return (
+                error_result(f"{chosen} failed: {exc}"),
+                {"error": tail_of_exception(exc)},
+                "forward",
+            )
 
     # -- run loop ----------------------------------------------------------
 

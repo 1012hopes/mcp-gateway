@@ -48,11 +48,13 @@
 | D5 | 11-16 | 多上游 + 命名空间 + schema 归一 | `registry.py`、上游配置 | 两上游并存、工具名无冲突、`schema_hash` 跨重启稳定；`$ref/oneOf` 归一后不为空 |
 | D6 | 11-17 | 生命周期接线 + 轨迹落盘 | `gateway/__main__.py` 装配、`session.py` | 一次真实任务产出完整 trace，每行含 `offered`（此阶段全量）、`chosen`、`prev_hash` |
 | D7 | 11-18 | 参数归一化 + R1 + R3 | `gateway/stop/normalize.py`、`rules/duplicate.py`、`rules/budget.py` | 归一化单测覆盖 timestamp/UUID/键序/浮点/大小写；R1、R3 **各至少触发 1 次**（断言命中率 > 0） |
-| D8 | 11-19 | R2 无进展 + 规则注册表 | `rules/no_progress.py`、`stop/controller.py` | `state_hash` 含最近 3 次调用签名；`stop_check.attempted` 非空；对抗任务步数显著下降 |
+| D8 | 11-19 | R2 无进展 + 规则注册表 | `rules/no_progress.py`、`stop/controller.py` 接入 R1/R2/R3 | `state_hash` 含最近 3 次调用签名；`stop_check.attempted` 非空；对抗任务步数显著下降 |
 
 **这一阶段最容易静默失败的两处**，每天收工前必须自检一次：
 1. `R1/R2` 命中次数是否为 0（为 0 说明归一化没生效，指标会全变 0 且不报错）
 2. `attempted` 是否记录了全部试过的规则（不记就无法回答"为什么不是别的规则停的"）
+
+> **计划变更（D6 记录）**：`stop/controller.py` 从 D8 提前到 D6。原因：D6 的"生命周期接线"若不包含 pre/post 两段插槽，D7 插 R1 时必然回头改 transport——那是同一天做两遍。D6 交付空控制器 + 零规则（`rules-v0(none)`），D7/D8 只加规则文件与一个元组字面量。影响 gate：无（G2 仍是 D8 的"步数显著下降"）。
 
 ### 阶段三：证据与实验（D9–D12，Gate G3）
 

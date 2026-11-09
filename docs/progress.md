@@ -8,6 +8,7 @@
 | D2（同日完成） | 完成 | `sink.py`（fail-closed，写失败回滚不留半行）+ `verify.py`（L1 先于 L2，报首个异常）+ `cli.py`；74 tests；样例 12 步轨迹 + 6 种篡改演示全检出 | D3 已并入 D2，接 D4 透传与 G1 |
 | D4（11-09） | 完成 | 官方 SDK 2.3 透传 + `sqlite_server` 自写上游；真实运行 5 次调用产出 5 条带 `offered` 的记录并 verify 通过；fail-closed 三段演示全 PASS；94 tests（14 条需 SDK，裸解释器 skip） | D5：多上游 + 注册表 + schema 归一 |
 | D5（11-09） | 完成 | `registry.py`（归一 / 命名 / 哈希 / 漂移）+ `dirty_schema_server`；两上游 10 个工具并存，`sqlite.query` 与 `dirty.query` 互不遮蔽；`freeze_schema.py --check` OK；136 tests | D6：生命周期接线 + 轨迹落盘 |
+| D6（11-09） | 完成 | `stop/controller.py`（排序 / 短路 / `attempted`，零规则）+ 七步生命周期 + `agent/`（闭环策略 + 循环）；一条真实任务 9 步、9 条记录、`verify` OK；182 tests | D7：参数归一化 + R1 + R3 |
 
 ## D1 完成判据核对
 
@@ -92,3 +93,31 @@
 5. **`dirty_schema_server` 从 D13 提前到 D5。** D5 的判据"`$ref/oneOf` 归一后不为空"没有脏上游就无法验收；先写它省一次返工，D13 只剩 `weird_capability_server` 与 `slow_flaky_server`。
 6. **`digest_of` 从 `session.py` 移到 `trace/canonical.py`。** trace 与 registry 现在都要算摘要，两份实现迟早会在浮点或键序上分叉，而摘要不一致是没人会发现的对比 bug。
 7. **删掉 `config.max_tools`。** 它在 D4 只是"取前 N 个"，从未真正做过准入；真正的 K 是 D14 的 gating，届时要连同 `offered` 的子集语义一起设计。留一个"看起来在控制上下文、实际只是截断"的开关比没有更危险。
+
+## D6 完成判据核对
+
+| 判据（`PLAN.md`） | 结果 |
+|---|---|
+| 一次真实任务产出完整 trace | `scripts/agent_demo.py`：9 步、9 条记录，`one record per delivered call` / `seq contiguous` 全 PASS |
+| 每行含 `offered`（此阶段全量） | 每行 `sorted(offered) == sorted(tools/list 的返回)`，`test_offered_is_the_full_set_at_this_stage` 守着；D14 做 gating 时这条会失败，那是要改断言的地方，不是要绕过的地方 |
+| 每行含 `chosen` / `prev_hash` | `test_every_record_carries_the_fields_that_make_it_judgeable`；`chosen ∈ offered` 同时断言 |
+| 证据集 / 预算上下文已挂上 | `RunSession` 持 `budget / required / evidence / history`；`--require` 可注入必需证据；`stop_context()` 是规则唯一入口 |
+| 真实 Agent 循环（替代写死的调用表） | `agent/`：`ReactivePolicy` 每步只依赖上一步 payload，`test_beliefs_come_from_observations` 证明表名来自 step 1 而不是硬编码 |
+
+## D6 的五个发现
+
+**1. `args_hash` 不是调用身份。** 第一次跑 e2e 断言"只有一个重复 args_hash"，结果是两个：`count_rows({"table":"incidents"})` 与 `describe_table({"table":"incidents"})` 参数完全相同，摘要自然相同。R1 的条件必须比 `(tool, args_hash)` 元组——只看 args_hash 会把"换个工具问同一个对象"误判成重复调用，而那恰好是 R2 该抓的伪进展。断言已改成元组，`DESIGN` A2 的条件本来就是这两个的合取，是我写测试时差点把口径改松。
+
+**2. R1 的"回填上次结果"与"轨迹不存 payload"直接冲突。** 轨迹里只有 `result_digest`（这是"轨迹不能变成数据副本"的代价），所以命中重复后无处可取原结果，除非在 run 内保留一份内存缓存。结论写进 `DESIGN` 2.4：回填只能来自内存缓存（run 结束即释放），不能来自轨迹；不允许驻留的结果类型则退化为"拦截并说明"，并把退化写进断言。
+
+**3. 停止通知不能进 `result_digest`。** 通知在摘要**之后**追加。反过来做的话，同一个上游答案会因网关当时的决策不同而哈希不同，跨 run 对比当场失效——而且是静默失效。`test_notice_is_not_part_of_the_result_digest` 守这条。
+
+**4. `rules_version` 必须由控制器生成，不能是常量。** `Gateway.__init__` 用 `controller.version` 覆盖 session 的默认值。否则插了规则还写着 `rules-v0(none)`，等于在轨迹里撒谎——而这条轨迹的全部价值就是"说的和做的一致"。
+
+**5. 缺口要显式留着：证据抽取为空，所以 `missing` 恒不消失。** 每次 run 的 stderr 摘要都是 `"missing": ["sql.rows","sql.schema"]`。这不是 bug，是 D9 之前 R4 不可能触发的原因。把它写在这里，比让一个空实现假装抽到了证据要好——本项目反对的正是"不报错、但结论是假的"。
+
+## D6 追加的三条偏差
+
+8. **`stop/controller.py` 从 D8 提前到 D6。** 计划里 D6 只写"生命周期接线"，但"接线"如果不含 pre/post 两段的插槽，D7 插 R1 时必然回头改 transport。先建空控制器 + 零规则（`rules-v0(none)`），D7/D8 只加规则文件和一个元组字面量。
+9. **新增 `agent/` 包（计划里没有）。** 原计划用 `scripts/echo_client.py` 的调用表充当"agent"，但那是开环的：下一步不依赖上一步结果，测不出任何"停得早/停得晚"。`agent/` 独立于 `gateway/` 是刻意的——网关要能控制**它不拥有**的 agent，放进同一个包里，这句话就变成"一个程序内部的事"。
+10. **`tasks/` 先放 1 条任务（D11 才要求 20 条）。** 没有任务规格，`--require` 只能手敲，D7 的 R4 就没有验收对象。D11 只扩充文件，不改代码。

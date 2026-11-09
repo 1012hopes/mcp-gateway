@@ -28,7 +28,8 @@ import anyio
 
 from .config import GatewayConfig, load_config, repo_root
 from .registry import RegistryError, load_baseline
-from .session import RunSession, new_run_id, new_session_id
+from .session import Budget, RunSession, new_run_id, new_session_id
+from .stop import StopController
 from .trace.sink import JsonlSink, TraceChainError, TraceWriteError
 from .transport import Gateway
 from .upstream import StdioUpstream
@@ -54,7 +55,26 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--parent-run-id", default=None)
     parser.add_argument("--model-id", default=None)
     parser.add_argument("--trace-dir", default=None)
+    parser.add_argument(
+        "--require",
+        action="append",
+        default=[],
+        metavar="EV_TYPE",
+        help="evidence type this task needs; repeatable (D9 loads these from config)",
+    )
+    parser.add_argument("--max-calls", type=int, default=24)
+    parser.add_argument("--max-wall-ms", type=int, default=600_000)
     return parser
+
+
+def build_controller() -> StopController:
+    """The single assembly point for stop criteria (DESIGN 2.2).
+
+    Empty at D6: the stages are wired, no rule is installed. D7 adds duplicate
+    and budget, D8 adds no-progress, D9 adds completeness -- each as one entry
+    in this tuple, never by editing the controller.
+    """
+    return StopController(())
 
 
 def prepare(config: GatewayConfig, args: argparse.Namespace) -> RunSession:
@@ -75,6 +95,8 @@ def prepare(config: GatewayConfig, args: argparse.Namespace) -> RunSession:
         session_id=args.session_id or new_session_id(),
         parent_run_id=args.parent_run_id,
         model_id=args.model_id or config.model_id or UNKNOWN_MODEL_ID,
+        budget=Budget(max_calls=args.max_calls, max_wall_ms=args.max_wall_ms),
+        required=set(args.require or ()),
     )
 
 
@@ -123,7 +145,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         return EXIT_USAGE
 
     try:
-        gateway = Gateway(config, upstreams, session, baseline=baseline)
+        gateway = Gateway(
+            config, upstreams, session, controller=build_controller(), baseline=baseline
+        )
     except ValueError as exc:
         _log(f"config error: {exc}")
         return EXIT_USAGE

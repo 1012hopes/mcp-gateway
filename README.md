@@ -7,7 +7,7 @@
 
 一句话概括差异化：**别的网关管"谁能调"，这个管"什么时候该停"，并且能证明那次停是对的。**
 
-> 状态：**D5 / D18**（轨迹层 + 多上游透传 + 工具面归一 + fail-closed 已跑通，尚无终止判据）。进度见 [`PLAN.md`](PLAN.md) 与 [`docs/progress.md`](docs/progress.md)。
+> 状态：**D6 / D18**（轨迹层 + 多上游 + 生命周期接线 + Agent 循环已跑通，尚无终止判据）。进度见 [`PLAN.md`](PLAN.md) 与 [`docs/progress.md`](docs/progress.md)。
 
 ## 它解决什么问题
 
@@ -40,9 +40,10 @@ recursion_limit = 25  # LangGraph
 | D2 | 写入（fail-closed）+ verify 首错定位 | ✅ |
 | D3 | 篡改用例（6 处 + 2 个进阶攻击） | ✅ 并入 D2 |
 | D4 | 单上游透传 + 真实轨迹 + **G1 演示** | ✅ |
-| D5 | 多上游 + 工具面归一 + schema 漂移冻结 | ✅ 136 tests（14 条需 SDK，裸解释器自动跳过） |
-| D6–D8 | 四级判据 + 证据集 + **G2 演示** | 待做 |
-| D9–D12 | 20 条任务 + checker + **G3 指标表** | 待做 |
+| D5 | 多上游 + 工具面归一 + schema 漂移冻结 | ✅ |
+| D6 | 生命周期接线 + 证据/预算上下文 + Agent 循环 + 完整轨迹 | ✅ 182 tests |
+| D7–D9 | R1/R3 → R2 → R4 + 证据集 + **G2 演示** | 待做 |
+| D10–D12 | run 边界 + 20 条任务 + checker + **G3 指标表** | 待做 |
 
 ## 快速开始
 
@@ -53,6 +54,9 @@ py -3.12 -m unittest discover -s tests -t .
 # 端到端：agent -> 网关 -> sqlite 上游 -> 轨迹落盘 -> verify
 uv sync
 uv run python scripts/echo_client.py
+
+# D6：一条真实任务，Agent 循环自己决定下一步，网关逐步落轨迹
+uv run python scripts/agent_demo.py
 
 # G1 演示：正常运行 / 真实拔掉写权限 / 注入写盘失败
 uv run python scripts/failclosed_demo.py
@@ -77,6 +81,24 @@ python -m gateway.trace verify traces/samples/demo-12-steps.jsonl
 ```
 
 **为什么轨迹层零依赖**：它是整个项目的证据底座，不该因为某个包升级而写不出记录。`upstream.py` / `transport.py` 才依赖官方 MCP SDK（`mcp>=2.3`）。
+
+## 一次 run 的七个步骤（D6 把线接完，D7 开始插规则）
+
+| # | 做什么 | 在哪 | 出错时 |
+|---|---|---|---|
+| 1 | 收到 `tools/call` | `transport.handle_call_tool` | — |
+| 2 | **前置守卫**：危险动作 / 重复调用 | `stop` 的 `pre` 阶段 | 不触达上游，仍写一条记录 |
+| 3 | 转发上游（超时 + 失败归一） | `_forward` | 变成 error 结果，不中断 |
+| 4 | 结果归一 → 抽取证据增量 | `session.extract_evidence`（D9） | 记 `evidence_added: []` |
+| 5 | **后置判定**：证据完备 / 无进展 / 预算 | `stop` 的 `post` 阶段 | 产出 `stop_check` 断言 |
+| 6 | 写记录（含 `offered/chosen/prev_hash`） | `session.record_call` | 结果丢弃、run 置 `ABORTED` |
+| 7 | 交付结果（+ 停止通知） | 同上，之后 | 后续调用一律拒绝 |
+
+**为什么分两段而不是一段**：R5/R1 的价值在于"让这次调用不发生"，必须在转发之前；R4/R2/R3 要看到新证据才能判，只能在之后。`priority` 仍是全局有序（10/20 < 30/40/50），`attempted` 是两段按执行顺序拼接的日志——"为什么不是别的规则停的"要靠它回答。
+
+**停止怎么传达给 Agent**：结果里追加一个 `[gateway] halt | state=… | rule=… | reason=…` 文本块（`gateway/wire.py`，全项目唯一被两侧共享的模块）。这是**礼貌**；真正的约束是**后续调用一律拒绝**。只靠通知的停止是 prompt，不是控制。
+
+**Agent 侧**（`agent/`，独立于网关的客户端）：`ReactivePolicy` 每一步都从**上一步的结果**推下一步，写完有用步骤后进入"再验一遍"阶段——它不知道什么时候该停。这不是缺陷，是 R4 要压缩的那段行为，也是指标的分母。换成真模型只需替换 `next_action`，循环、轨迹、规则都不用动。
 
 ## 工具面：归一化不是格式化，是"让工具可被调用"
 
@@ -118,22 +140,27 @@ D4 把它做成了可演示、可断言的行为：
 
 ```
 gateway/
-  __main__.py        唯一装配点：先开 sink，再连上游（开不了就退出）
+  __main__.py        唯一装配点：先开 sink，再连上游，最后装规则（开不了就退出）
   config.py          配置解析（{python} / {root} 替换）
-  session.py         RunSession：run 级状态与唯一写轨迹入口
+  session.py         RunSession：证据集 / 预算 / 调用历史 + 唯一写轨迹入口
+  stop/controller.py 停止控制器：排序、短路、attempted 日志（**不含任何判据**）
+  wire.py            停止通知的线格式——网关与 agent 唯一共享的模块
   registry.py        工具面：schema 归一、命名空间、schema_hash、漂移冻结
-  transport.py       MCP server 侧：list / call 分发，记录成功后才交付结果
+  transport.py       MCP server 侧：七步生命周期，记录成功后才交付结果
   upstream.py        MCP client：stdio 连接，只负责通信，不做归一
   trace/canonical.py 确定性序列化（键序、浮点、UTF-8、拒绝 NaN）
   trace/record.py    TraceRecord + StopCheck + 哈希链入口
   trace/sink.py      fail-closed 写入（写失败回滚，不留半行）
   trace/verify.py    双层校验：L1 完整性 → L2 结构，报首个异常
   trace/cli.py       verify 命令（退出码 0/1，可进 CI）
+agent/               客户端：policy（决策）/ loop（驱动）/ tasks（任务规格）
 mcp_servers/sqlite_server.py        只读 SQLite 上游（数据固定可复现）
 mcp_servers/dirty_schema_server.py  故意不合规的上游（$ref / oneOf / 非法名）
+tasks/01_unresolved_incidents.json  一条任务：目标 + 必需证据 + 轮数上限
 config/gateway.json                 上游、trace 目录、模型标识
 config/schema-manifest.json         冻结的工具契约（入库，改上游后重跑冻结）
-scripts/echo_client.py              端到端驱动
+scripts/echo_client.py              端到端驱动（固定调用表，D4 产物）
+scripts/agent_demo.py               D6：Agent 循环跑完一条任务并自检轨迹
 scripts/failclosed_demo.py          G1 的 S1/S2/S3
 scripts/tamper_demo.py              8 个篡改用例
 scripts/freeze_schema.py            冻结 / `--check` 检查 schema 漂移

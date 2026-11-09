@@ -329,10 +329,11 @@ mcp-gateway/
 │   ├── __main__.py      # ★ 唯一装配点：所有具体实现只在这里 import
 │   ├── version.py       # gateway_version / rules_version 常量
 │   ├── config.py        # 配置解析（{python} / {root} 替换，路径相对于仓库根）
-│   ├── session.py       # ★ 会话上下文：证据集 / 预算 / offered 历史 / trace 绑定
-│   ├── transport.py     # MCP server 侧：list / call 分发 + 记录-后交付
+│   ├── session.py       # ★ 会话上下文：证据集 / 预算 / 调用历史 / trace 绑定
+│   ├── transport.py     # MCP server 侧：七步生命周期 + 记录-后交付
 │   ├── upstream.py      # MCP client 池：连接、健康检查、超时、重试
 │   ├── registry.py      # 工具聚合、命名空间、schema 归一与冲突检测
+│   ├── wire.py          # ★ 停止通知的线格式：网关与 agent 唯一共享的模块
 │   ├── selector.py      # 工具准入（A1）
 │   ├── rules/
 │   │   ├── base.py      # ★ Rule 协议 + 注册表（按 priority 排序）
@@ -341,7 +342,8 @@ mcp-gateway/
 │   │   ├── complete.py  # R4
 │   │   ├── progress.py  # R2
 │   │   └── budget.py    # R3
-│   ├── stop.py          # ★ 只做编排：排序、短路、断言，不含具体判据
+│   ├── stop/
+│   │   └── controller.py # ★ 只做编排：排序、短路、attempted，不含具体判据
 │   ├── evidence.py      # 证据集 + 抽取器注册
 │   ├── extractors/      # ★ ev_type → 纯函数，一类型一文件
 │   ├── trace/
@@ -353,8 +355,12 @@ mcp-gateway/
 │   ├── replay.py        # 确定性重放（A5）
 │   ├── policy.py        # 白名单 / 预算 / 审批 / 脱敏
 │   └── metrics.py       # 指标计算（A6）
+├── agent/               # ★ 客户端：不在网关里——网关要能控制"别人的 agent"
+│   ├── policy.py        # 决策函数（全项目唯一的 LLM 形状接缝）
+│   ├── loop.py          # 驱动：起网关子进程 → 问策略 → 观测 → 重复
+│   └── tasks.py         # TaskSpec 读取（目标 / 必需证据 / 轮数上限）
 ├── mcp_servers/         # 自写上游：sqlite / wiki / 三个 fake
-├── tasks/               # 20 条任务 + checker + good/bad 样本
+├── tasks/               # 20 条任务 + 任务规格 JSON（D11 扩充）+ checker + 样本
 ├── config/
 │   ├── gateway.json     # 上游、K、预算（JSON 而非 YAML：零依赖、可 diff）
 │   ├── rules.json       # ★ 规则开关与参数（w=2 等）
@@ -439,13 +445,15 @@ EvidenceSpec（冻结产物，来自离线层）
 
 1. 收到 `tools/call(name, args)`
 2. **策略检查**：白名单 / 预算 / 危险工具 → 不通过则拦截并记录 `decision=block_policy`
-3. **前置守卫**：重复调用 / 无进展预检 → 命中则直接返回上次结果，不触达上游
+3. **前置守卫**：危险动作 / 重复调用 → 命中则不触达上游，只返回拦截结果
 4. 转发上游（超时 + 重试 + 缓存）
 5. 结果归一 → 抽取证据增量 → 更新证据集
 6. **后置判定**：证据完备？预算耗尽？→ 产出 stop 断言
 7. 写 TraceRecord（含哈希）→ **写盘成功之后**才返回结果 + 断言
 
 顺序不可交换：安全在最先，主动收束在被动兜底之前。
+
+> **A2 里"R1 回填上次结果"要改口径（D6 发现）**：轨迹只存 `result_digest`，不存 payload——这是"轨迹不能变成数据副本"的直接代价。所以重复调用命中后，**回填只能来自 run 内的内存缓存**（`seq → 结果`），不能来自轨迹，也不能指望从文件里重放。内存缓存不违背原则（run 结束即释放、不落盘），D7 按这个做；若某类结果不允许驻留内存，R1 就退化为"拦截并说明"，并把这个退化写进断言。
 
 第 7 步的先后关系是**实现契约**，不是风格问题（D4 落实）：记录写失败时，这次调用的结果直接丢弃、run 置为 `ABORTED`、后续调用一律拒绝。反过来写（先返回再记录）会留下"模型据此行动过、但证据里没有"的调用——而这恰好是哈希链唯一的盲区。可断言的形式是：
 
@@ -455,6 +463,10 @@ results_delivered == records_written        # run 正常结束或被中止时成
 ```
 
 两条断言在 `tests/test_failclosed.py` 里被真实上游 + 真实写失败驱动验证，不靠自评。
+
+**两段式判定（D6 落实）**：第 2/3 步的规则（R5/R1）跑在 `stage=pre`，第 6 步的规则（R4/R2/R3）跑在 `stage=post`。分开的理由不是整洁：pre 规则的价值在于**让这次调用不发生**，post 规则必须看到新证据才能判。控制器按 `priority` 全局有序（10/20 < 30/40/50），`attempted` 是两段按执行顺序拼接的日志。
+
+**停止如何传达**：命中后结果照常交付（它是有效证据），并追加一个 `[gateway] halt | state=… | rule=… | reason=…` 文本块（`gateway/wire.py`）。通知是给**配合的** agent 的礼貌；不配合的没有第二次机会——后续调用一律拒绝。只靠通知的停止是 prompt，不是控制。注意通知在 `result_digest` **之后**追加：它是网关元数据，不是上游数据，混进摘要会让同一个上游答案因网关决策不同而哈希不同，跨 run 对比当场失效。
 
 以上 7 步全部在 `Session` 上下文内执行（证据集 / 预算 / offered 历史 / trace 绑定），网关进程本身不持有会话状态——这是多 run 并发的前提（见 2.8）。
 

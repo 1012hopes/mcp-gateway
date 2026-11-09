@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Iterator, List, Optional, Union
+from typing import Callable, Iterator, List, Optional, Union
 
 from .record import TraceRecord, genesis_hash
 
@@ -57,10 +57,15 @@ class JsonlSink:
         *,
         run_id: Optional[str] = None,
         fsync: bool = True,
+        fsync_fn: Optional[Callable[[int], None]] = None,
     ) -> None:
         self.path = Path(path)
         self._run_id = run_id
         self._fsync = fsync
+        # Dependency-injection seam for fault injection. Not an env var, not a
+        # flag: a caller that wants to test "what if the disk fails here" passes
+        # a function that raises. Production callers never pass it.
+        self._fsync_fn = fsync_fn
         self._broken = False
         self._closed = False
         self._last_seq = 0
@@ -146,13 +151,18 @@ class JsonlSink:
         self._last_seq = record.seq
         self._last_hash = record.hash
 
+    def _sync(self) -> None:
+        if not self._fsync:
+            return
+        # Resolved at call time so tests can patch ``os.fsync`` globally.
+        (self._fsync_fn or os.fsync)(self._handle.fileno())
+
     def _write_line(self, line: str) -> None:
         position = self._handle.tell()
         try:
             self._handle.write(line)
             self._handle.flush()
-            if self._fsync:
-                os.fsync(self._handle.fileno())
+            self._sync()
         except OSError as exc:
             self._broken = True
             self._rollback(position)

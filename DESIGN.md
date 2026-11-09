@@ -327,8 +327,10 @@ Agent (LLM client)
 mcp-gateway/
 ├── gateway/
 │   ├── __main__.py      # ★ 唯一装配点：所有具体实现只在这里 import
+│   ├── version.py       # gateway_version / rules_version 常量
+│   ├── config.py        # 配置解析（{python} / {root} 替换，路径相对于仓库根）
 │   ├── session.py       # ★ 会话上下文：证据集 / 预算 / offered 历史 / trace 绑定
-│   ├── transport.py     # MCP server 侧：list / call 分发
+│   ├── transport.py     # MCP server 侧：list / call 分发 + 记录-后交付
 │   ├── upstream.py      # MCP client 池：连接、健康检查、超时、重试
 │   ├── registry.py      # 工具聚合、命名空间、schema 归一与冲突检测
 │   ├── selector.py      # 工具准入（A1）
@@ -343,24 +345,33 @@ mcp-gateway/
 │   ├── evidence.py      # 证据集 + 抽取器注册
 │   ├── extractors/      # ★ ev_type → 纯函数，一类型一文件
 │   ├── trace/
+│   │   ├── canonical.py # 确定性序列化（键序 / 浮点 / 拒绝 NaN）
 │   │   ├── record.py    # ★ TraceRecord + schema 版本与演进
 │   │   ├── sink.py      # ★ TraceSink 接口：jsonl / sqlite / memory
-│   │   └── verify.py    # ★ 版本化校验
+│   │   ├── verify.py    # ★ 版本化校验（L1 完整性 → L2 结构）
+│   │   └── cli.py       # verify 命令，退出码 0/1 供 CI 使用
 │   ├── replay.py        # 确定性重放（A5）
 │   ├── policy.py        # 白名单 / 预算 / 审批 / 脱敏
 │   └── metrics.py       # 指标计算（A6）
 ├── mcp_servers/         # 自写上游：sqlite / wiki / 三个 fake
 ├── tasks/               # 20 条任务 + checker + good/bad 样本
 ├── config/
-│   ├── gateway.yaml     # 上游、K、预算
+│   ├── gateway.json     # 上游、K、预算（JSON 而非 YAML：零依赖、可 diff）
 │   ├── rules.yaml       # ★ 规则开关与参数（w=2 等）
 │   └── evidence.json    # 冻结的证据模型
-├── traces/              # 运行产物
+├── traces/              # 运行产物（samples/ 入库，runs/ 与 demo/ 忽略）
 ├── scripts/
+│   ├── echo_client.py   # 端到端驱动：agent → 网关 → 上游 → 轨迹
+│   ├── failclosed_demo.py  # G1 的 S1/S2/S3 三段演示
+│   ├── make_sample.py   # 可复现的 12 步基线样例
+│   ├── tamper_demo.py   # 8 种篡改 + 1 个已知盲区
 │   ├── experiment.py    # 基线/网关对照
 │   └── freeze_evidence.py
 └── DESIGN.md
 ```
+
+**依赖边界**：`trace/` 只有标准库（证据底座不能因为某个包升级就写不出记录）；`upstream.py` / `transport.py` / `mcp_servers/` 依赖官方 MCP SDK。这条边界让"篡改检测"永远能在裸解释器里跑起来。
+
 
 两个结构性约束（比目录本身重要）：
 
@@ -431,9 +442,18 @@ EvidenceSpec（冻结产物，来自离线层）
 4. 转发上游（超时 + 重试 + 缓存）
 5. 结果归一 → 抽取证据增量 → 更新证据集
 6. **后置判定**：证据完备？预算耗尽？→ 产出 stop 断言
-7. 写 TraceRecord（含哈希）→ 返回结果 + 断言
+7. 写 TraceRecord（含哈希）→ **写盘成功之后**才返回结果 + 断言
 
 顺序不可交换：安全在最先，主动收束在被动兜底之前。
+
+第 7 步的先后关系是**实现契约**，不是风格问题（D4 落实）：记录写失败时，这次调用的结果直接丢弃、run 置为 `ABORTED`、后续调用一律拒绝。反过来写（先返回再记录）会留下"模型据此行动过、但证据里没有"的调用——而这恰好是哈希链唯一的盲区。可断言的形式是：
+
+```
+results_delivered <= records_written        # 恒成立
+results_delivered == records_written        # run 正常结束或被中止时成立
+```
+
+两条断言在 `tests/test_failclosed.py` 里被真实上游 + 真实写失败驱动验证，不靠自评。
 
 以上 7 步全部在 `Session` 上下文内执行（证据集 / 预算 / offered 历史 / trace 绑定），网关进程本身不持有会话状态——这是多 run 并发的前提（见 2.8）。
 
@@ -558,7 +578,7 @@ RUNNING
 
 | # | 扩展点 | 契约 | 新增一个要改 | 约束 |
 |---|---|---|---|---|
-| EP-1 | 上游 server | 实现 MCP 协议 | `gateway.yaml` 加 1 行 | 无 |
+| EP-1 | 上游 server | 实现 MCP 协议 | `gateway.json` 加 1 行 | 无 |
 | EP-2 | 终止规则 | `name` / `priority` / `check(ctx) -> Decision\|None` | `rules/xxx.py` + `rules.yaml` 登记 | O(1)、无副作用、必须声明 priority |
 | EP-3 | 证据类型 | `ev_type` + `extractor(result) -> bool` | `extractors/xxx.py` + `evidence.json` 一行 | extractor 必须是**纯函数**（否则重放不成立） |
 | EP-4 | 传输 | `connect` / `list` / `call` / `close` | 新增适配器文件 | 不得向上层泄漏协议细节 |
@@ -572,7 +592,7 @@ RUNNING
 
 | 场景 | 判定标准 |
 |---|---|
-| S1 加一个新上游 server | 只改 yaml；`git diff --name-only` 不含 `gateway/` |
+| S1 加一个新上游 server | 只改 `gateway.json`；`git diff --name-only` 不含 `gateway/` |
 | S2 加一个新判据（如"连续 3 次结果为空"） | 新增 1 个文件 + 1 行配置；`stop.py` **零改动** |
 | S3 换一个领域（如法规检索） | 只改 `evidence.json` + `tasks/`；`gateway/` 零改动 |
 | S4 换存储（JSONL → SQLite） | 只加一个 sink 文件；调用方零改动 |

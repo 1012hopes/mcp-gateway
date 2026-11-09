@@ -5,7 +5,11 @@ description = "Termination control and verifiable trajectory for MCP tool calls"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-dependencies = []
+dependencies = [
+    # Only the transport layer needs the SDK. `gateway.trace` stays stdlib-only,
+    # so chain verification never depends on a third-party package resolving.
+    "mcp>=2.3,<3.0",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]

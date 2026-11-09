@@ -14,8 +14,12 @@ traces/*
 !traces/samples/*.jsonl
 !traces/.gitkeep
 *.sqlite
+*.sqlite3
 *.db
 *.db-journal
+
+# 演示用的种子数据库
+var/
 
 # 本地配置与密钥
 .env

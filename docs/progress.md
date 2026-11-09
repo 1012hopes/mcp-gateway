@@ -6,6 +6,7 @@
 |---|---|---|---|
 | D1（提前于 11-09 完成） | 完成 | `canonical.py` + `record.py`，37 tests 通过；哈希覆盖未知字段、浮点与键序归一、`-0.0` 折叠、NaN 拒绝 | D2 |
 | D2（同日完成） | 完成 | `sink.py`（fail-closed，写失败回滚不留半行）+ `verify.py`（L1 先于 L2，报首个异常）+ `cli.py`；74 tests；样例 12 步轨迹 + 6 种篡改演示全检出 | D3 已并入 D2，接 D4 透传与 G1 |
+| D4（11-09） | 完成 | 官方 SDK 2.3 透传 + `sqlite_server` 自写上游；真实运行 5 次调用产出 5 条带 `offered` 的记录并 verify 通过；fail-closed 三段演示全 PASS；94 tests（14 条需 SDK，裸解释器 skip） | D5：多上游 + 注册表 + schema 归一 |
 
 ## D1 完成判据核对
 
@@ -40,3 +41,29 @@
 **3. 哈希链挡不住"重写整条尾链"。** 改一条记录后把后续 `prev_hash` 和 `hash` 全部重算，链依然自洽；删掉尾部 N 行同样检不出。这不是实现 bug，是哈希链的固有性质，已写成 `verify` 成功时必打印的 note + `DESIGN` 局限第 7 条 + 测试 `test_rewriting_the_whole_tail_produces_a_valid_chain`。要封住需要外部锚定（链头签名 / 只追加日志 / 末条 hash 打进 git tag），不在本期范围。
 
 **顺带一个自我提醒**：`tamper_demo.py` 第一次跑时"中间行字段"漏检——因为我把 `chosen` 改成了它本来就有的值，一个字节没变。演示脚本因此加了一条硬检查：**改完若文件字节未变，判定为"无效篡改"并计为失败**，绝不报"检出"。这正是本项目要防的那类错：不报错、但结论是假的。
+
+## D4 完成判据核对
+
+| 判据（`PLAN.md`） | 结果 |
+|---|---|
+| 拔掉写权限后 run 中止 | `os.chmod(path, S_IREAD)` 后网关退出码 **3**，`stderr` 含 `refusing to start`；旧链字节完全未变 |
+| `trace 行数 = 已执行调用数` | 见下面的口径修正：断言改为 `results_delivered == records_written`，在真实上游 + 真实写失败下验证 |
+| echo 客户端能 list + call 到 sqlite 工具 | `scripts/echo_client.py`：4 个工具（`sqlite.*`）+ 5 次调用全部成功，`verify` PASS |
+| G1：改一条旧记录，指出坏在第几行 | `scripts/tamper_demo.py` 8/8 符合文档；真实轨迹上同样 8/8 |
+
+## D4 的四个发现
+
+**1. `trace 行数 = 已执行调用数` 这个口径本身是错的，已改成 `results_delivered == records_written`。**
+
+写失败发生在"上游已执行、记录未落盘"之间。此时调用确实执行过，但记录必然没有——按原口径恒不成立，除非把 fail-closed 做成"先写记录再执行"（那又会记录下没发生的调用）。真正要保证的不是"行数等于调用数"，而是**没有任何结果在未被记录的情况下交付给模型**：结果被丢弃、run 中止、后续调用全拒。这三件事都在 `tests/test_failclosed.py` 里断言了。
+
+**2. 官方 SDK 2.3 是 handler 式 API，不是 1.x 的装饰器。** `Server(on_list_tools=..., on_call_tool=...)`，`StdioServerParameters` 变成了 pydantic 模型。好处是**处理函数是普通方法**，所以 fail-closed 路径可以在进程内被测试和演示直接驱动，不必每次起子进程。这是把它写成方法而不是闭包的原因。
+
+**3. 配置用 JSON 不用 YAML。** `gateway.yaml` 需要额外依赖，而 JSON 零依赖、可 diff、可以被机器读——三条都符合 `DESIGN` 2.7 那条"配置属于机器，散文属于 wiki"。解析隔离在 `config.py`，将来要换 YAML 只改一个文件。已同步回 `DESIGN` 2.2 / EP-1 / S1。
+
+**4. 篡改用例在短轨迹上会退化。** 真实轨迹只有 2 条记录时，"删中间行"其实是删尾行，属于已知盲区；若照原样计分，会把"盲区"误报成"漏检"，等于用一个错的基线去评价工具。现在索引强制取"有后继"的位置，轨迹少于 4 条时显式打印告警。
+
+## D4 追加的两条偏差
+
+3. **`stop_check` 在 D4 恒为空**（`attempted=[]`、`hit=false`）。不是遗漏：`rules-v0` 还没有任何规则，写空比写"看似在判"诚实。字段存在性由 `test_stop_check_is_present_and_empty_at_d4` 守着，D7 接入 R1/R3 后这里必须非空。
+4. **`truncated` 只按结果体积标记（>1MB），尚未真正截断。** 截断必须与证据抽取一起做，否则半份数据会被当成完整证据——那是 D9 的事。提前标 `truncated=true` 不会误导，提前截断会。

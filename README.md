@@ -7,7 +7,7 @@
 
 一句话概括差异化：**别的网关管"谁能调"，这个管"什么时候该停"，并且能证明那次停是对的。**
 
-> 状态：**D1 / D18 进行中**（只有轨迹层，尚无网关）。进度见 [`PLAN.md`](PLAN.md)。
+> 状态：**D4 / D18**（轨迹层 + 单上游透传 + fail-closed 已跑通，尚无终止判据）。进度见 [`PLAN.md`](PLAN.md) 与 [`docs/progress.md`](docs/progress.md)。
 
 ## 它解决什么问题
 
@@ -37,65 +37,86 @@ recursion_limit = 25  # LangGraph
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | D1 | 记录结构 + canonical 序列化 | ✅ |
-| D2 | 写入（fail-closed）+ verify 首错定位 + 样例轨迹 | ✅ 74 tests |
-| D3 | 5 处篡改用例 | ✅ 提前并入 D2 |
-| D4 | 单上游透传 + **G1 演示** | 待做 |
+| D2 | 写入（fail-closed）+ verify 首错定位 | ✅ |
+| D3 | 篡改用例（6 处 + 2 个进阶攻击） | ✅ 并入 D2 |
+| D4 | 单上游透传 + 真实轨迹 + **G1 演示** | ✅ 94 tests（14 条需 SDK，裸解释器自动跳过） |
 | D5–D8 | 四级判据 + 证据集 + **G2 演示** | 待做 |
 | D9–D12 | 20 条任务 + checker + **G3 指标表** | 待做 |
 
 ## 快速开始
 
-无第三方依赖，纯标准库即可跑测试：
-
 ```bash
-py -3.12 -m unittest discover -s tests -t . -v
+# 轨迹层零依赖，裸解释器就能跑（需要 SDK 的用例会自动 skip）
+py -3.12 -m unittest discover -s tests -t .
+
+# 端到端：agent -> 网关 -> sqlite 上游 -> 轨迹落盘 -> verify
+uv sync
+uv run python scripts/echo_client.py
+
+# G1 演示：正常运行 / 真实拔掉写权限 / 注入写盘失败
+uv run python scripts/failclosed_demo.py
+
+# 篡改演示：8 个用例，其中 1 个是文档记载的盲区
+uv run python scripts/tamper_demo.py --path traces/runs/<run>.jsonl
 ```
 
-看一次篡改检测（6 种改法，逐条报出位置与原因）：
+不带 `uv` 时用虚拟环境里的解释器：`.venv\Scripts\python.exe scripts\echo_client.py`。
+
+单纯校验一条轨迹：
 
 ```bash
-py -3.12 scripts/make_sample.py
-py -3.12 scripts/tamper_demo.py
-```
-
-或直接校验单条轨迹：
-
-```bash
-py -3.12 -m gateway.trace verify traces/samples/demo-12-steps.jsonl
+python -m gateway.trace verify traces/samples/demo-12-steps.jsonl
 # [PASS] traces/samples/demo-12-steps.jsonl
 #   OK: 12 条记录，链完整
 #   note: 链完整只证明「已记录的部分没被改过」：删掉尾部 N 行，剩余链依然自洽；…
 ```
 
-或使用 `uv`（本机未入 PATH 时用完整路径 `~/.local/bin/uv.exe`）：
+**为什么轨迹层零依赖**：它是整个项目的证据底座，不该因为某个包升级而写不出记录。`upstream.py` / `transport.py` 才依赖官方 MCP SDK（`mcp>=2.3`）。
 
-```bash
-uv sync --extra dev
-uv run pytest
-```
+## fail-closed 是唯一能挡"漏记"的东西
 
-为什么零依赖：轨迹层是整个项目的证据底座，它不该因为某个包升级而写不出记录。
+哈希链能证明"已记录的部分没被改"，**不能证明"一次调用都没漏"**——删掉尾巴，链依然自洽。所以只剩一条防线：
+
+> **记录不下来，就不执行。**
+
+D4 把它做成了可演示、可断言的行为：
+
+| 场景 | 行为 | 断言 |
+|---|---|---|
+| 启动时轨迹不可写 | 退出码 3，一次调用都不发生 | 旧链字节不变，`verify` 仍通过 |
+| 运行中写盘失败 | 结果丢弃、run 置 `ABORTED`、后续调用全拒 | `results_delivered == records_written` |
+
+第二条是关键：写失败的那次调用，**模型拿不到结果**，所以不会基于"没被记录的证据"继续推理。
 
 ## 目录
 
 ```
-gateway/trace/canonical.py   确定性序列化（键序、浮点、UTF-8、拒绝 NaN）
-gateway/trace/record.py      TraceRecord + StopCheck + 哈希链入口
-gateway/trace/sink.py        fail-closed 写入（写失败回滚，不留半行）
-gateway/trace/verify.py      双层校验：L1 完整性 → L2 结构，报首个异常
-gateway/trace/cli.py         verify 命令（退出码 0/1，可进 CI）
-scripts/make_sample.py       生成确定性样例轨迹（同一份字节，可 diff）
-scripts/tamper_demo.py       6 种篡改 × 6 次检出，退出码即结论
-tests/                       74 个单元测试
-DESIGN.md                    需求 / 架构 / 算法（含相关工作核查与创新点定位）
-PLAN.md                      D1–D18 排期、三个 gate、风险登记、砍功能顺序
+gateway/
+  __main__.py        唯一装配点：先开 sink，再连上游（开不了就退出）
+  config.py          配置解析（{python} / {root} 替换）
+  session.py         RunSession：run 级状态与唯一写轨迹入口
+  transport.py       MCP server 侧：list / call 分发，记录成功后才交付结果
+  upstream.py        MCP client：stdio 连接、命名空间、schema_hash
+  trace/canonical.py 确定性序列化（键序、浮点、UTF-8、拒绝 NaN）
+  trace/record.py    TraceRecord + StopCheck + 哈希链入口
+  trace/sink.py      fail-closed 写入（写失败回滚，不留半行）
+  trace/verify.py    双层校验：L1 完整性 → L2 结构，报首个异常
+  trace/cli.py       verify 命令（退出码 0/1，可进 CI）
+mcp_servers/sqlite_server.py  只读 SQLite 上游（自写，数据固定可复现）
+config/gateway.json           上游、trace 目录、模型标识
+scripts/echo_client.py        端到端驱动
+scripts/failclosed_demo.py    G1 的 S1/S2/S3
+scripts/tamper_demo.py        8 个篡改用例
+docs/demo-g1.md               G1 台词与录屏脚本
 ```
 
-## 两个设计决定，值得单独说
+## 三个设计决定，值得单独说
 
 **哈希覆盖字节，版本号解释语义。** `hash` 覆盖 canonical JSON 的**全部字段**，包括当前版本不认识的字段（存在 `_extra` 里原样回写）。因此加字段不会作废旧轨迹：`verify` 按记录的 `schema_version` 选校验器，只检查该版本必需字段是否存在。
 
 **未知字段必须存活。** 旧代码读到新字段时若丢弃不写，字节就变了，链当场断——所以 `from_dict` 保留未知字段，`to_dict` 原样还回去。这条有测试守着。
+
+**工具名先命名空间化。** 暴露给模型的是 `sqlite.query`，而不是 `query`。事后加前缀会改写全部历史 `chosen` 值，把所有跨 run 对比作废——这类改动必须第一天做。
 
 ## Related work
 
@@ -108,6 +129,7 @@ PLAN.md                      D1–D18 排期、三个 gate、风险登记、砍�
 - 证据模型需按任务族手工建模，**不可泛化到开放任务**（`DESIGN` 假设 A2）
 - 哈希链保证记录完整，**不保证上游结果真实**（需上游签名）
 - **链只能检出局部改动**：有写权限者可把改后记录的后续 `prev_hash`/`hash` 全部重算，链依然自洽；删掉尾部 N 行同样检不出。要封住这两个口子需外部锚定（链头签名、只追加日志、把末条 `hash` 打进 git tag）。`verify` 成功时会打印这条限制，不让"链完整"被读成"无遗漏"
+- **中途写失败的那次调用已经执行过了**：结果不会交给模型，但上游副作用无法回滚。所以只读工具可以放心重试，写操作需要上游侧幂等（`DESIGN` FR-17）
 - 工具返回内容会进模型上下文，存在提示注入面，只能约束"结果不解析为控制流"
 - 参数在 20 条任务上标定，样本量不做显著性检验，只报配对差值
 

@@ -1,0 +1,17 @@
+{
+  "gateway": {
+    "name": "mcp-gateway",
+    "trace_dir": "traces/runs",
+    "model_id": "unlabeled-agent",
+    "max_tools": null
+  },
+  "upstreams": [
+    {
+      "name": "sqlite",
+      "command": "{python}",
+      "args": ["-m", "mcp_servers.sqlite_server", "--db", "var/demo.sqlite3"],
+      "cwd": "{root}",
+      "call_timeout_s": 20
+    }
+  ]
+}

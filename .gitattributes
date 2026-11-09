@@ -1,0 +1,12 @@
+# 轨迹文件是证据：不允许任何换行符转换，否则不同机器 checkout 出来的字节不同。
+*.jsonl -text
+
+# 源码与文档统一 LF，避免 Windows 上 CRLF 污染 diff。
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.gitignore text eol=lf
+*.gitattributes text eol=lf

@@ -36,9 +36,9 @@ recursion_limit = 25  # LangGraph
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| D1 | 记录结构 + canonical 序列化 | ✅ 37 tests |
-| D2 | 写入（fail-closed）+ verify 首错定位 | 待做 |
-| D3 | 5 处篡改用例 | 待做 |
+| D1 | 记录结构 + canonical 序列化 | ✅ |
+| D2 | 写入（fail-closed）+ verify 首错定位 + 样例轨迹 | ✅ 74 tests |
+| D3 | 5 处篡改用例 | ✅ 提前并入 D2 |
 | D4 | 单上游透传 + **G1 演示** | 待做 |
 | D5–D8 | 四级判据 + 证据集 + **G2 演示** | 待做 |
 | D9–D12 | 20 条任务 + checker + **G3 指标表** | 待做 |
@@ -49,6 +49,22 @@ recursion_limit = 25  # LangGraph
 
 ```bash
 py -3.12 -m unittest discover -s tests -t . -v
+```
+
+看一次篡改检测（6 种改法，逐条报出位置与原因）：
+
+```bash
+py -3.12 scripts/make_sample.py
+py -3.12 scripts/tamper_demo.py
+```
+
+或直接校验单条轨迹：
+
+```bash
+py -3.12 -m gateway.trace verify traces/samples/demo-12-steps.jsonl
+# [PASS] traces/samples/demo-12-steps.jsonl
+#   OK: 12 条记录，链完整
+#   note: 链完整只证明「已记录的部分没被改过」：删掉尾部 N 行，剩余链依然自洽；…
 ```
 
 或使用 `uv`（本机未入 PATH 时用完整路径 `~/.local/bin/uv.exe`）：
@@ -65,7 +81,12 @@ uv run pytest
 ```
 gateway/trace/canonical.py   确定性序列化（键序、浮点、UTF-8、拒绝 NaN）
 gateway/trace/record.py      TraceRecord + StopCheck + 哈希链入口
-tests/                       37 个单元测试
+gateway/trace/sink.py        fail-closed 写入（写失败回滚，不留半行）
+gateway/trace/verify.py      双层校验：L1 完整性 → L2 结构，报首个异常
+gateway/trace/cli.py         verify 命令（退出码 0/1，可进 CI）
+scripts/make_sample.py       生成确定性样例轨迹（同一份字节，可 diff）
+scripts/tamper_demo.py       6 种篡改 × 6 次检出，退出码即结论
+tests/                       74 个单元测试
 DESIGN.md                    需求 / 架构 / 算法（含相关工作核查与创新点定位）
 PLAN.md                      D1–D18 排期、三个 gate、风险登记、砍功能顺序
 ```
@@ -86,6 +107,7 @@ PLAN.md                      D1–D18 排期、三个 gate、风险登记、砍�
 
 - 证据模型需按任务族手工建模，**不可泛化到开放任务**（`DESIGN` 假设 A2）
 - 哈希链保证记录完整，**不保证上游结果真实**（需上游签名）
+- **链只能检出局部改动**：有写权限者可把改后记录的后续 `prev_hash`/`hash` 全部重算，链依然自洽；删掉尾部 N 行同样检不出。要封住这两个口子需外部锚定（链头签名、只追加日志、把末条 `hash` 打进 git tag）。`verify` 成功时会打印这条限制，不让"链完整"被读成"无遗漏"
 - 工具返回内容会进模型上下文，存在提示注入面，只能约束"结果不解析为控制流"
 - 参数在 20 条任务上标定，样本量不做显著性检验，只报配对差值
 

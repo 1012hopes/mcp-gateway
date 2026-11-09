@@ -9,7 +9,7 @@ field is merely added -- adding a field is covered by ``schema_version``.
 
 from __future__ import annotations
 
-GATEWAY_VERSION = "0.3.0"
+GATEWAY_VERSION = "0.4.0"
 
 #: ``rules-v0`` means: no stop rules installed yet (D5-D8 add them). A trace
 #: stamped ``rules-v0`` cannot be compared with a later run on stop behaviour,

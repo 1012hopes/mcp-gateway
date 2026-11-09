@@ -594,9 +594,14 @@ def load_baseline(path: Path) -> Optional[Dict[str, str]]:
 
 
 def write_baseline(path: Path, registry: Registry) -> None:
+    """Write LF explicitly.
+
+    ``Path.write_text`` translates ``\\n`` to ``os.linesep``, so on Windows this
+    file would differ from the one a Linux contributor writes by every line
+    ending. For a hash manifest that is a permanent, pointless churn -- and worse,
+    it looks like a content change in review.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(registry.manifest(), indent=2, ensure_ascii=False, sort_keys=True)
-        + "\n",
-        encoding="utf-8",
-    )
+    text = json.dumps(registry.manifest(), indent=2, ensure_ascii=False, sort_keys=True)
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text + "\n")

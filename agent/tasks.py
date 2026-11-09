@@ -27,6 +27,10 @@ class TaskSpec:
     goal: str
     required_evidence: Tuple[str, ...] = ()
     max_turns: int = 12
+    #: The gateway's call budget for this task. ``None`` keeps the gateway
+    #: default; a task that is expected to finish in four calls can say so, and
+    #: then R3 firing is a property of the task, not of the harness's flags.
+    max_calls: Optional[int] = None
     policy: str = "reactive_sqlite"
     #: Filled by D11/D12; absent here rather than faked.
     optimal_steps: Optional[int] = None
@@ -43,6 +47,7 @@ class TaskSpec:
             goal=str(data.get("goal", "")),
             required_evidence=tuple(str(item) for item in required),
             max_turns=int(data.get("max_turns", 12)),
+            max_calls=(int(data["max_calls"]) if data.get("max_calls") is not None else None),
             policy=str(data.get("policy", "reactive_sqlite")),
             optimal_steps=data.get("optimal_steps"),
             checker=data.get("checker"),
@@ -53,6 +58,8 @@ class TaskSpec:
         args: List[str] = []
         for ev_type in self.required_evidence:
             args.extend(["--require", ev_type])
+        if self.max_calls is not None:
+            args.extend(["--max-calls", str(self.max_calls)])
         return args
 
 

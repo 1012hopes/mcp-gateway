@@ -28,6 +28,7 @@ import anyio
 
 from .config import GatewayConfig, load_config, repo_root
 from .registry import RegistryError, load_baseline
+from .rules import BudgetExhausted, DuplicateCall
 from .session import Budget, RunSession, new_run_id, new_session_id
 from .stop import StopController
 from .trace.sink import JsonlSink, TraceChainError, TraceWriteError
@@ -64,17 +65,28 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-calls", type=int, default=24)
     parser.add_argument("--max-wall-ms", type=int, default=600_000)
+    parser.add_argument(
+        "--no-rules",
+        action="store_true",
+        help="run with an empty controller: the baseline an experiment compares against",
+    )
     return parser
 
 
-def build_controller() -> StopController:
+def build_controller(*, enabled: bool = True) -> StopController:
     """The single assembly point for stop criteria (DESIGN 2.2).
 
-    Empty at D6: the stages are wired, no rule is installed. D7 adds duplicate
-    and budget, D8 adds no-progress, D9 adds completeness -- each as one entry
-    in this tuple, never by editing the controller.
+    One entry per rule -- no registry object, no import side effects. A rule set
+    that assembled itself would make ``rules_version`` depend on import order,
+    and the stamp in the trace is the only thing that keeps two runs comparable.
+
+    ``enabled=False`` is not a debug switch: the experiment needs a run governed
+    by nothing to answer "how many steps does this task take without the
+    gateway", and reproducing D6's numbers must not require reverting a commit.
     """
-    return StopController(())
+    if not enabled:
+        return StopController(())
+    return StopController((DuplicateCall(), BudgetExhausted()))
 
 
 def prepare(config: GatewayConfig, args: argparse.Namespace) -> RunSession:
@@ -146,7 +158,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         gateway = Gateway(
-            config, upstreams, session, controller=build_controller(), baseline=baseline
+            config, upstreams, session, controller=build_controller(enabled=not args.no_rules), baseline=baseline
         )
     except ValueError as exc:
         _log(f"config error: {exc}")

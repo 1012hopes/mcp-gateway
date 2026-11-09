@@ -35,7 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, FrozenSet, Iterable, List, Optional, Protocol, Sequence, Tuple
 
-from ..session import Budget, CallSignature
+from ..limits import Budget, CallSignature
 from ..trace.record import StopCheck
 
 __all__ = [
@@ -70,6 +70,8 @@ class StopContext:
     required: FrozenSet[str]
     history: Tuple[CallSignature, ...]
     budget: Budget
+    #: Calls the run has spent **counting the one being judged** -- so a rule
+    #: that halts on "call 3 of 3" agrees with the ``seq`` a reviewer reads.
     calls_used: int
     wall_ms: int
 

@@ -41,6 +41,7 @@ from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
 from .config import GatewayConfig
+from .limits import CallSignature
 from .registry import Registry, ToolEntry, build_registry
 from .session import MAX_RESULT_BYTES, RunSession, extract_evidence
 from .stop import POST, PRE, StopContext, StopController, StopVerdict, merge_checks
@@ -50,6 +51,10 @@ from .version import GATEWAY_VERSION
 from .wire import KIND_CLOSED, KIND_HALT, format_notice
 
 __all__ = ["Gateway", "result_payload", "text_result", "error_result"]
+
+#: How many delivered results stay replayable. Above any plausible run length
+#: (the default call budget is 24) so a miss means a bug, not bookkeeping.
+DELIVERED_CACHE_LIMIT = 64
 
 
 def result_payload(result: types.CallToolResult) -> Dict[str, Any]:
@@ -101,6 +106,11 @@ class Gateway:
         self._baseline = baseline
         self._registry: Optional[Registry] = None
         self._by_upstream: Dict[str, StdioUpstream] = {}
+        #: What this run already handed back, for R1's replay. Keyed by call
+        #: identity, bounded, and never persisted: the trace records digests,
+        #: not payloads, so this is the only place a payload can be replayed
+        #: from (DESIGN 2.4 -- the trace cannot be read back as a data store).
+        self._delivered: Dict[CallSignature, types.CallToolResult] = {}
         for upstream in self.upstreams:
             if upstream.name in self._by_upstream:
                 # Two servers under one prefix would silently shadow each other
@@ -148,7 +158,10 @@ class Gateway:
             required=frozenset(session.required),
             history=tuple(session.history),
             budget=session.budget,
-            calls_used=session.records_written,
+            # Counts the call being judged, not just the finished ones: a rule
+            # that says "this is call 3 of 3" must agree with the number a
+            # reviewer reads off the trace, and that record is seq 3.
+            calls_used=session.records_written + 1,
             wall_ms=session.wall_ms(),
         )
 
@@ -185,6 +198,7 @@ class Gateway:
         attempted: List[str] = []
         verdict: Optional[StopVerdict] = None
         evidence_added: List[str] = []
+        keep_result = True
 
         # -- steps 2-3: pre-stage guards ----------------------------------
         pre = self.controller.evaluate(PRE, self.stop_context(chosen, signature.args_hash))
@@ -195,17 +209,27 @@ class Gateway:
             # all. That is the whole reason these rules run first.
             verdict = pre.verdict
             decision = verdict.decision
+            keep_result = False
             session.halt(verdict.state, rule=verdict.rule, reason=verdict.reason)
-            response = error_result(
-                format_notice(
-                    KIND_HALT,
-                    state=verdict.state,
-                    decision=verdict.decision,
-                    rule=verdict.rule,
-                    reason=verdict.reason,
+            replayed = self._recall(signature) if verdict.replay_last else None
+            if replayed is not None:
+                # R1's replay: the data is already in the transcript, so handing
+                # it back is both cheaper and more useful than an error. It is
+                # also auditable -- the record's result_digest equals the earlier
+                # step's, which proves the same bytes were returned.
+                response = replayed
+                payload: Dict[str, Any] = result_payload(replayed)
+            else:
+                response = error_result(
+                    format_notice(
+                        KIND_HALT,
+                        state=verdict.state,
+                        decision=verdict.decision,
+                        rule=verdict.rule,
+                        reason=verdict.reason,
+                    )
                 )
-            )
-            payload: Dict[str, Any] = {"blocked": verdict.reason}
+                payload = {"blocked": verdict.reason}
         else:
             response, payload, forwarded_decision = await self._forward(
                 entry, chosen, offered, args
@@ -251,6 +275,13 @@ class Gateway:
                 "trace write failed; run aborted and this result is discarded "
                 "(fail-closed)"
             )
+
+        if keep_result:
+            # Remembered only after the record landed: the cache is a cache of
+            # *delivered* results, and a result withheld by fail-closed was never
+            # delivered. Anything else would let a later replay hand back
+            # evidence the trace says never reached the model.
+            self._remember(signature, response)
 
         # -- step 7b: deliver, with the halt notice attached ----------------
         if session.halted and verdict is not None:
@@ -315,6 +346,23 @@ class Gateway:
                 {"error": tail_of_exception(exc)},
                 "forward",
             )
+
+    # -- cross-turn result memory (R1's replay) ----------------------------
+
+    def _remember(self, signature: CallSignature, result: types.CallToolResult) -> None:
+        """Keep a copy of what the model received. Bounded, insertion-ordered."""
+        if signature in self._delivered:
+            return
+        if len(self._delivered) >= DELIVERED_CACHE_LIMIT:
+            # Evict the oldest. A miss only downgrades a replay to "blocked,
+            # explained", so the bound is a memory limit, not a correctness one.
+            self._delivered.pop(next(iter(self._delivered)))
+        self._delivered[signature] = result.model_copy(deep=True)
+
+    def _recall(self, signature: CallSignature) -> Optional[types.CallToolResult]:
+        """A fresh copy: the caller appends a halt notice to what it gets back."""
+        cached = self._delivered.get(signature)
+        return cached.model_copy(deep=True) if cached is not None else None
 
     # -- run loop ----------------------------------------------------------
 

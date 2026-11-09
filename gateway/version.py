@@ -9,12 +9,17 @@ field is merely added -- adding a field is covered by ``schema_version``.
 
 from __future__ import annotations
 
-GATEWAY_VERSION = "0.5.0"
+GATEWAY_VERSION = "0.6.0"
 
 #: ``rules-v0`` means: the *versioning scheme*, not "no rules". The actual set is
-#: appended by ``StopController.version`` (``rules-v0(none)`` at D6, later
-#: ``rules-v0(duplicate,budget,...)``). A trace stamped with one set cannot be
-#: compared with a run under another -- which is exactly why the stamp exists.
+#: appended by ``StopController.version`` (``rules-v0(R1,R3)`` at D7). A trace
+#: stamped with one set cannot be compared with a run under another -- which is
+#: exactly why the stamp exists.
+#:
+#: This constant is only the default on a session that no controller has been
+#: attached to yet; ``Gateway.__init__`` overwrites it from the controller. It is
+#: set to ``(none)`` rather than to the current rule names on purpose: a second
+#: place listing the installed rules would be a second thing to forget to update.
 RULES_VERSION = "rules-v0(none)"
 
 #: Used when the caller does not declare which model drove the loop. Keeping a

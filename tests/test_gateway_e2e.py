@@ -49,7 +49,13 @@ class GatewayEndToEndTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls._tmp = tempfile.TemporaryDirectory()
         cls.trace_dir = Path(cls._tmp.name)
-        cls.outcome = asyncio.run(drive(CALLS, run_id="run-e2e", trace_dir=cls.trace_dir))
+        # ``--no-rules`` on purpose: this file is the D4 contract (transport,
+        # namespacing, offered, chain), and installing criteria would make every
+        # assertion depend on the rule set of the day. The governed path has its
+        # own tests in ``test_agent_e2e.py``.
+        cls.outcome = asyncio.run(
+            drive(CALLS, run_id="run-e2e", trace_dir=cls.trace_dir, extra_args=["--no-rules"])
+        )
         cls.trace_path = cls.trace_dir / "run-e2e.jsonl"
         cls.records = [
             json.loads(line)
@@ -113,8 +119,8 @@ class GatewayEndToEndTests(unittest.TestCase):
             self.assertEqual(record["state"], "RUNNING")
             self.assertEqual(record["decision"], "forward")
 
-    def test_stop_check_is_present_and_empty_at_d4(self):
-        # No rules yet: the field must exist and say "nothing was attempted",
+    def test_stop_check_is_present_and_empty_without_rules(self):
+        # ``--no-rules``: the field must exist and say "nothing was attempted",
         # rather than be missing -- a missing field would be ambiguous later.
         for record in self.records:
             self.assertEqual(record["stop_check"]["attempted"], [])

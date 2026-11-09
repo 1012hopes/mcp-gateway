@@ -7,7 +7,7 @@
 
 一句话概括差异化：**别的网关管"谁能调"，这个管"什么时候该停"，并且能证明那次停是对的。**
 
-> 状态：**D6 / D18**（轨迹层 + 多上游 + 生命周期接线 + Agent 循环已跑通，尚无终止判据）。进度见 [`PLAN.md`](PLAN.md) 与 [`docs/progress.md`](docs/progress.md)。
+> 状态：**D7 / D18**（轨迹层 + 多上游 + 生命周期 + 参数归一化 + R1 重复调用 / R3 预算已跑通；R2/R4 与证据集待做）。进度见 [`PLAN.md`](PLAN.md) 与 [`docs/progress.md`](docs/progress.md)。
 
 ## 它解决什么问题
 
@@ -42,7 +42,8 @@ recursion_limit = 25  # LangGraph
 | D4 | 单上游透传 + 真实轨迹 + **G1 演示** | ✅ |
 | D5 | 多上游 + 工具面归一 + schema 漂移冻结 | ✅ |
 | D6 | 生命周期接线 + 证据/预算上下文 + Agent 循环 + 完整轨迹 | ✅ 182 tests |
-| D7–D9 | R1/R3 → R2 → R4 + 证据集 + **G2 演示** | 待做 |
+| D7 | 参数归一化 + R1 重复调用 + R3 预算（**同任务 9 步 → 5 步**） | ✅ 241 tests |
+| D8–D9 | R2 无进展 → R4 证据完备 + **G2 演示** | 待做 |
 | D10–D12 | run 边界 + 20 条任务 + checker + **G3 指标表** | 待做 |
 
 ## 快速开始
@@ -55,8 +56,9 @@ py -3.12 -m unittest discover -s tests -t .
 uv sync
 uv run python scripts/echo_client.py
 
-# D6：一条真实任务，Agent 循环自己决定下一步，网关逐步落轨迹
+# D6/D7：同一条任务跑两遍（无规则 vs 有规则），对比步数并自检
 uv run python scripts/agent_demo.py
+uv run python scripts/agent_demo.py --max-calls 3    # 用 R3 收束而不是 R1
 
 # G1 演示：正常运行 / 真实拔掉写权限 / 注入写盘失败
 uv run python scripts/failclosed_demo.py
@@ -82,12 +84,12 @@ python -m gateway.trace verify traces/samples/demo-12-steps.jsonl
 
 **为什么轨迹层零依赖**：它是整个项目的证据底座，不该因为某个包升级而写不出记录。`upstream.py` / `transport.py` 才依赖官方 MCP SDK（`mcp>=2.3`）。
 
-## 一次 run 的七个步骤（D6 把线接完，D7 开始插规则）
+## 一次 run 的七个步骤（D6 接线，D7 起真的有规则在里面）
 
 | # | 做什么 | 在哪 | 出错时 |
 |---|---|---|---|
 | 1 | 收到 `tools/call` | `transport.handle_call_tool` | — |
-| 2 | **前置守卫**：危险动作 / 重复调用 | `stop` 的 `pre` 阶段 | 不触达上游，仍写一条记录 |
+| 2 | **前置守卫**：危险动作 / 重复调用 | `stop` 的 `pre` 阶段 | 不触达上游，仍写一条记录（R1 回填上次结果） |
 | 3 | 转发上游（超时 + 失败归一） | `_forward` | 变成 error 结果，不中断 |
 | 4 | 结果归一 → 抽取证据增量 | `session.extract_evidence`（D9） | 记 `evidence_added: []` |
 | 5 | **后置判定**：证据完备 / 无进展 / 预算 | `stop` 的 `post` 阶段 | 产出 `stop_check` 断言 |
@@ -99,6 +101,34 @@ python -m gateway.trace verify traces/samples/demo-12-steps.jsonl
 **停止怎么传达给 Agent**：结果里追加一个 `[gateway] halt | state=… | rule=… | reason=…` 文本块（`gateway/wire.py`，全项目唯一被两侧共享的模块）。这是**礼貌**；真正的约束是**后续调用一律拒绝**。只靠通知的停止是 prompt，不是控制。
 
 **Agent 侧**（`agent/`，独立于网关的客户端）：`ReactivePolicy` 每一步都从**上一步的结果**推下一步，写完有用步骤后进入"再验一遍"阶段——它不知道什么时候该停。这不是缺陷，是 R4 要压缩的那段行为，也是指标的分母。换成真模型只需替换 `next_action`，循环、轨迹、规则都不用动。
+
+## 判据：从 R1 开始（D7）
+
+同一条任务，同一套策略，只差网关里有没有装规则：
+
+```
+baseline -- no rules installed
+  ... 9 步 ...            stop: policy_exhausted
+governed -- rules installed
+  ... 5 步 ...            stop: halted   rule=R1  state=HALTED_DUPLICATE
+        reason=sqlite.query with identical arguments already ran at step 3
+steps: 9 -> 5  (saved 4)
+```
+
+| 规则 | priority | 阶段 | 命中后 | 为什么在这个位置 |
+|---|---|---|---|---|
+| R1 重复调用 | 20 | pre | `HALTED_DUPLICATE`，**回填上次结果** | 价值在于让这次调用不发生 |
+| R3 预算耗尽 | 50 | post | `HALTED_BUDGET` | 最后一道保险；跑到这里说明任务没做完 |
+
+三件值得单独说的事：
+
+**重复不等于错误。** R1 命中后不返回错误，而是把上次的结果还给模型——数据本来就在上下文里，重发一遍比报错有用。可验证性没有因此打折：回填结果的 `result_digest` 与被重复那一步相等，所以"这是同一份数据"是**被证明**的，不是被声称的。
+
+**"同一个调用"是 `(tool, args_hash)`，不是 `args_hash`。** `count_rows({"table":"x"})` 和 `describe_table({"table":"x"})` 参数相同、问题不同；只看摘要会把"换个工具问同一件事"误判成重复，而那恰好是无进展判定该抓的伪进展。
+
+**归一化是判据的前提，不是格式美化。** 参数里带 `request_id`、浮点尾差或键序不同，R1 就永远不会触发——而且不报错，只让所有数字静默归零。所以 `stop/normalize.py` 的每条规则都成对存在：丢掉噪声，**同时**保住语义。两条保守原则：volatile 键**按键名**判定（UUID 形状的值在 `id` 下就是"要查哪一行"），大小写折叠**按工具族声明**（SQLite 标识符不区分大小写，别的不一定）。误判一个重复的代价是停掉一个健康的 run 并在轨迹里留下一条错决策——比漏判贵得多。
+
+`--no-rules` 不是调试开关：D12 的对照表需要"没有网关时这条任务跑多少步"作分母，靠回滚 commit 生成的分母一定会过期。
 
 ## 工具面：归一化不是格式化，是"让工具可被调用"
 
@@ -142,8 +172,12 @@ D4 把它做成了可演示、可断言的行为：
 gateway/
   __main__.py        唯一装配点：先开 sink，再连上游，最后装规则（开不了就退出）
   config.py          配置解析（{python} / {root} 替换）
+  limits.py          Budget + CallSignature（纯值类型，叶子模块，避免依赖成环）
   session.py         RunSession：证据集 / 预算 / 调用历史 + 唯一写轨迹入口
   stop/controller.py 停止控制器：排序、短路、attempted 日志（**不含任何判据**）
+  stop/normalize.py  参数归一化：调用身份的唯一定义处（A2.1）
+  rules/duplicate.py R1 重复调用（pre，回填上次结果）
+  rules/budget.py    R3 预算耗尽（post，最后一道保险）
   wire.py            停止通知的线格式——网关与 agent 唯一共享的模块
   registry.py        工具面：schema 归一、命名空间、schema_hash、漂移冻结
   transport.py       MCP server 侧：七步生命周期，记录成功后才交付结果
@@ -160,7 +194,7 @@ tasks/01_unresolved_incidents.json  一条任务：目标 + 必需证据 + 轮�
 config/gateway.json                 上游、trace 目录、模型标识
 config/schema-manifest.json         冻结的工具契约（入库，改上游后重跑冻结）
 scripts/echo_client.py              端到端驱动（固定调用表，D4 产物）
-scripts/agent_demo.py               D6：Agent 循环跑完一条任务并自检轨迹
+scripts/agent_demo.py               D7：基线 vs 受控，同一任务两遍 + 10 项自检
 scripts/failclosed_demo.py          G1 的 S1/S2/S3
 scripts/tamper_demo.py              8 个篡改用例
 scripts/freeze_schema.py            冻结 / `--check` 检查 schema 漂移
@@ -189,6 +223,7 @@ docs/demo-g1.md                     G1 台词与录屏脚本
 - **中途写失败的那次调用已经执行过了**：结果不会交给模型，但上游副作用无法回滚。所以只读工具可以放心重试，写操作需要上游侧幂等（`DESIGN` FR-17）
 - 工具返回内容会进模型上下文，存在提示注入面，只能约束"结果不解析为控制流"
 - **schema 漂移时工具直接消失**：从 `offered` 移除、调用返回 `block_schema_drift`，而不是降级继续。这是刻意的（历史轨迹可比性优先），但现场看起来像"网关坏了"，所以 `registry: schema-drift:...` 会打到 stderr
+- **R1 的回填假设上游在一轮 run 内是参数的函数**：回填的是上次结果，上游若可变，回填的可能是过期数据。当前上游只读（`mode=ro`），假设成立；换可写上游时必须退化为"拦截并说明"，并把退化写进 `decision`
 - 参数在 20 条任务上标定，样本量不做显著性检验，只报配对差值
 
 ## License

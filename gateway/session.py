@@ -39,8 +39,10 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Set
+from typing import Any, Dict, List, Mapping, Optional, Set
 
+from .limits import Budget, CallSignature
+from .stop.normalize import normalize_args, spec_for
 from .trace.canonical import digest_of
 from .trace.record import StopCheck, TraceRecord
 from .trace.sink import JsonlSink
@@ -77,30 +79,9 @@ TERMINAL_STATES = frozenset(
 )
 
 
-@dataclass(frozen=True)
-class Budget:
-    """What the gateway can actually count.
-
-    Calls and wall-clock time, not tokens: the gateway never sees the prompt, so
-    a token budget here would be a number nobody measured. Token accounting
-    belongs to the agent side, where the prompt exists. Stating the limit of the
-    measurement is cheaper than inventing a plausible number.
-    """
-
-    max_calls: int = 24
-    max_wall_ms: int = 600_000
-
-    def exhausted(self, *, calls_used: int, wall_ms: int) -> bool:
-        if calls_used >= self.max_calls:
-            return True
-        return self.max_wall_ms > 0 and wall_ms >= self.max_wall_ms
-
-
-class CallSignature(NamedTuple):
-    """What R1 hashes and R2 slots into its rolling state hash."""
-
-    tool: str
-    args_hash: str
+# ``Budget`` and ``CallSignature`` are re-exported, not defined here: they are
+# leaf values that the stop controller also needs, and defining them here made
+# ``session -> stop.normalize -> stop.controller -> session`` a cycle.
 
 
 def new_run_id() -> str:
@@ -212,17 +193,23 @@ class RunSession:
 
     # -- the stop-rule inputs ---------------------------------------------
 
-    def args_hash_for(self, args: Any) -> str:
+    def args_hash_for(self, tool: Optional[str], args: Any) -> str:
         """One place where call identity is computed.
 
-        D7 replaces the body with normalize-then-hash (DESIGN A2.1). Two call
-        sites computing identity differently would make R1 either never fire or
-        fire on everything, and neither failure raises an error.
+        Two call sites computing identity differently would make R1 either never
+        fire or fire on everything, and neither failure raises an error. So both
+        the pre-stage guard and the record go through here (DESIGN A2.1).
+
+        ``tool`` is part of the identity twice over: its namespace picks the
+        normalization policy, and the pair ``(tool, args_hash)`` -- not the hash
+        alone -- is what R1 compares. ``count_rows({"table": "x"})`` and
+        ``describe_table({"table": "x"})`` share arguments and are not the same
+        call.
         """
-        return digest_of(args)
+        return digest_of(normalize_args(args, spec_for(tool)))
 
     def proposed_signature(self, tool: str, args: Any) -> CallSignature:
-        return CallSignature(tool, self.args_hash_for(args))
+        return CallSignature(tool, self.args_hash_for(tool, args))
 
     def recent_signatures(self, limit: int = 3) -> List[CallSignature]:
         """The tail R2 folds into its state hash. Oldest first."""
@@ -262,7 +249,7 @@ class RunSession:
         of call happened without becoming a copy of the data (DESIGN 2.3).
         """
         seq, prev_hash = self.sink.expected_next()
-        args_hash = self.args_hash_for(args)
+        args_hash = self.args_hash_for(chosen, args)
         record = TraceRecord(
             seq=seq,
             run_id=self.run_id,

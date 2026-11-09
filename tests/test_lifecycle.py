@@ -124,7 +124,8 @@ class LifecycleTests(unittest.TestCase):
     # -- post-stage: the result still gets through -------------------------
 
     def test_post_halt_is_recorded_and_its_result_is_still_delivered(self):
-        rule = Rule("R4", 30, POST, when=lambda ctx: ctx.calls_used >= 1)
+        # ``calls_used`` counts the call being judged, so ``>= 2`` is the second.
+        rule = Rule("R4", 30, POST, when=lambda ctx: ctx.calls_used >= 2)
         session, results = self._run([rule], [{"sql": "a"}, {"sql": "b"}, ])
 
         self.assertEqual(session.state, "HALTED_COMPLETE")
@@ -184,7 +185,7 @@ class LifecycleTests(unittest.TestCase):
             PRE,
             when=lambda ctx: True,
             verdict=StopVerdict(
-                rule="R1", decision="block_duplicate", state="HALTED_DUPLICATE", reason="same call"
+                rule="R1", decision="halt_duplicate", state="HALTED_DUPLICATE", reason="same call"
             ),
         )
         session, results = self._run([rule], [{"sql": "a"}])
@@ -192,11 +193,34 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.upstream.calls, [], "a pre-stage verdict must block the call")
         self.assertEqual(session.state, "HALTED_DUPLICATE")
         record = self.records()[0]
-        self.assertEqual(record["decision"], "block_duplicate")
+        self.assertEqual(record["decision"], "halt_duplicate")
         self.assertEqual(record["state"], "HALTED_DUPLICATE")
         # What got recorded is the digest of what would have been returned --
         # "the call was blocked" is auditable, the arguments are not stored.
         self.assertEqual(record["result_digest"], digest_of({"blocked": "same call"}))
+
+    def test_pre_halt_with_replay_returns_the_earlier_result(self):
+        # The real R1, not a fake: the second identical call must not reach the
+        # upstream, and the agent must get the data it already had instead of an
+        # error. Both halves matter -- a "duplicate" answered with an error
+        # throws away evidence the run already paid for.
+        from gateway.rules import DuplicateCall
+
+        session, results = self._run([DuplicateCall()], [{"sql": "a"}, {"sql": "a"}])
+
+        self.assertEqual(len(self.upstream.calls), 1, "the duplicate must not be forwarded")
+        self.assertEqual(session.state, "HALTED_DUPLICATE")
+        self.assertFalse(results[1].is_error)
+        self.assertEqual(results[1].content[0].text, results[0].content[0].text)
+        self.assertEqual(parse_notice(results[1].content[1].text)["rule"], "R1")
+
+        records = self.records()
+        self.assertEqual(records[1]["decision"], "halt_duplicate")
+        self.assertEqual(
+            records[1]["result_digest"],
+            records[0]["result_digest"],
+            "the replay is provably the same result, not a re-execution",
+        )
 
     def test_attempted_lists_every_rule_that_ran_in_order(self):
         quiet_pre = Rule("R1", 20, PRE, when=lambda ctx: False)

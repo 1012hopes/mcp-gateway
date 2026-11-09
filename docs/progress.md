@@ -9,6 +9,7 @@
 | D4（11-09） | 完成 | 官方 SDK 2.3 透传 + `sqlite_server` 自写上游；真实运行 5 次调用产出 5 条带 `offered` 的记录并 verify 通过；fail-closed 三段演示全 PASS；94 tests（14 条需 SDK，裸解释器 skip） | D5：多上游 + 注册表 + schema 归一 |
 | D5（11-09） | 完成 | `registry.py`（归一 / 命名 / 哈希 / 漂移）+ `dirty_schema_server`；两上游 10 个工具并存，`sqlite.query` 与 `dirty.query` 互不遮蔽；`freeze_schema.py --check` OK；136 tests | D6：生命周期接线 + 轨迹落盘 |
 | D6（11-09） | 完成 | `stop/controller.py`（排序 / 短路 / `attempted`，零规则）+ 七步生命周期 + `agent/`（闭环策略 + 循环）；一条真实任务 9 步、9 条记录、`verify` OK；182 tests | D7：参数归一化 + R1 + R3 |
+| D7（11-09） | 完成 | `stop/normalize.py` + `rules/duplicate.py` + `rules/budget.py`；同一任务 **9 步 → 5 步**：R1 在第 5 步命中并回填第 3 步的结果（`result_digest` 相等）；`--max-calls 3` 的 run 由 R3 在第 3 步收束；241 tests | D8：R2 无进展 + 规则注册表完整化 |
 
 ## D1 完成判据核对
 
@@ -121,3 +122,34 @@
 8. **`stop/controller.py` 从 D8 提前到 D6。** 计划里 D6 只写"生命周期接线"，但"接线"如果不含 pre/post 两段的插槽，D7 插 R1 时必然回头改 transport。先建空控制器 + 零规则（`rules-v0(none)`），D7/D8 只加规则文件和一个元组字面量。
 9. **新增 `agent/` 包（计划里没有）。** 原计划用 `scripts/echo_client.py` 的调用表充当"agent"，但那是开环的：下一步不依赖上一步结果，测不出任何"停得早/停得晚"。`agent/` 独立于 `gateway/` 是刻意的——网关要能控制**它不拥有**的 agent，放进同一个包里，这句话就变成"一个程序内部的事"。
 10. **`tasks/` 先放 1 条任务（D11 才要求 20 条）。** 没有任务规格，`--require` 只能手敲，D7 的 R4 就没有验收对象。D11 只扩充文件，不改代码。
+
+## D7 完成判据核对
+
+| 判据（`PLAN.md`） | 结果 |
+|---|---|
+| 归一化单测覆盖 timestamp / UUID / 键序 / 浮点 / 大小写 | `tests/test_normalize.py` 25 条，每类都是**一对**断言：噪声被折叠 + 语义没被折叠 |
+| R1、R3 **各至少触发 1 次** | `tests/test_agent_e2e.py` 三个真实 run：`GovernedRun` 由 R1 在第 5 步收束、`BudgetRun` 由 R3 在第 3 步收束、`BaselineRun` 一次也没命中（对照组）。命中率 > 0 是被断言的，不是被声称的 |
+| 断言命中率 > 0 | 同上；`scripts/agent_demo.py` 把同一条任务跑两遍（`--no-rules` / 有规则）并自检 10 项，**9 步 → 5 步** |
+| `attempted` 记录全部试过的规则 | 前 4 步 `["R1","R3"]`，被 R1 短路的那步只有 `["R1"]`——`R3` 缺席正是"post 阶段没跑到"的证据 |
+
+## D7 的七个发现
+
+**1. 大小写归一不能全局做，否则就是造重复。** 计划 A2.1 写的是"枚举/工具名做 lower"，落到实现上含糊：`{"table": "INCIDENTS"}` 和 `{"table": "incidents"}` 对 SQLite 是同一个请求（标识符不区分大小写），对大小写敏感的上游是两个。全局折叠等于用猜测换命中率，而误判重复会让网关**停掉一个健康的 run 并说它是重复**——那是轨迹里一条错误的决策，比漏判贵得多。所以折叠改成按工具族声明（`SPECS_BY_PREFIX`，`sqlite` 声明 `table/column`），默认不折叠。
+
+**2. volatile 键必须按键名判定，不能按值的形状判定。** UUID 形状的值出现在 `request_id` 下是噪声，出现在 `id` 下就是"要查哪一行"。按形状丢键会把两次不同的查询并成一次。同理，时钟类键（`ts/time/now`）还要**值也像时间**才丢：`{"time": "business_hours"}` 是过滤器，不是时间戳。两条都有正反用例。
+
+**3. 归一化一插进来就撞上循环依赖。** `session` 要用 `normalize_args` 算调用身份，`normalize` 属于 stop 层，而 `stop.controller` 又需要 `session` 的 `Budget`/`CallSignature`。绕法有两条——方法内延迟 import，或 `TYPE_CHECKING` 撒谎——两条都是把结构问题藏起来。改成把两个纯值类型下沉到叶子模块 `gateway/limits.py`，`session` 再 re-export，依赖图变成两条无环边，已有 import 一处没改。
+
+**4. `calls_used` 必须含"正在判的这一次"。** 否则 `max_calls=3` 的 run 里，R3 的 reason 写"calls=2 达到上限 3"，而轨迹上停在第 3 条记录——读的人会以为规则早停了一步。现在语义是"这条记录算第几次调用"，和读者数的 `seq` 一致；生命周期测试里的假规则阈值也跟着从 `>= 1` 改成 `>= 2`。
+
+**5. R1 命中之后，原结果还能还回去。** D6 记下的遗憾（轨迹不存 payload，只能"拦截并说明"）解掉了：transport 持有 run 内已交付结果的缓存（上限 64，只在记录落盘之后写入），命中重复时回填。可验证性没有损失——回填结果的 `result_digest` 与被重复那一步相等，**"这是同一份数据"是被证明的，不是被声明的**（`test_pre_halt_with_replay_returns_the_earlier_result`）。
+
+**6. 基线必须是一条命令就能重跑的。** `--no-rules` 不是调试开关：D12 的对照表需要"没有网关时这条任务跑多少步"作分母，若只能靠回滚 commit 生成，那个数就永远过期。`scripts/agent_demo.py` 现在把两遍跑在同一个命令里，差值当场打印。
+
+**7. 9 → 5 是 R1 的功劳，也把 R4 的缺口照出来了。** 第 4 步（拿 stars 的 enrichment 查询）跑完，`sql.schema` + `sql.rows` 其实已经齐了——**本可以在第 4 步停**。R1 只能砍掉"逐字重复"，砍不掉"再验一遍换措辞的"。那 1 步的差距就是 D8/D9 要拿走的，也是 G2 的判据。
+
+## D7 追加的偏差
+
+11. **`test_gateway_e2e` 改走 `--no-rules`。** D6 记的偏差 3 说"接入 R1/R3 后这里必须非空"，但那个断言的本意是"字段存在"，不是"今天装了什么规则"；让它跟着规则集变，等于每加一条规则就要改一次 D4 的测试。现在它显式跑 `--no-rules`，规则路径由 `test_agent_e2e.py` 的三个 run 负责。
+12. **`args_hash_for` 增加 `tool` 参数。** 身份是 `(tool, args_hash)` 的合取，而归一化策略也按工具族选——两条理由都要求工具名进到这个函数，否则调用方迟早会在某一处漏掉 tool 而产生两套身份。
+13. **归一化策略暂时写在代码里（`SPECS_BY_PREFIX`），没进配置文件。** 现在只有一个上游族需要声明折叠，加一个 `config/normalize.json` 只是把一个字面量挪到另一个文件，还得为"文件缺失/写错"设计退化路径。D13 上三个脏上游时再决定它该不该成为配置项。

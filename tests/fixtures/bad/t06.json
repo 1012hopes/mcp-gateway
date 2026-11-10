@@ -1,0 +1,72 @@
+{
+  "answers": [
+    {
+      "args": {},
+      "payload": {
+        "tables": [
+          "commits",
+          "deps",
+          "incidents",
+          "labels",
+          "maintainers",
+          "releases",
+          "repos",
+          "scans"
+        ]
+      },
+      "tool": "sqlite.list_tables"
+    },
+    {
+      "args": {
+        "table": "maintainers"
+      },
+      "payload": {
+        "columns": [
+          {
+            "name": "repo",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "handle",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "role",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "since",
+            "notnull": false,
+            "type": "TEXT"
+          }
+        ],
+        "table": "maintainers"
+      },
+      "tool": "sqlite.describe_table"
+    },
+    {
+      "args": {
+        "limit": 50,
+        "sql": "select handle, role, since from maintainers where repo = 'maximhq/bifrost' order by handle"
+      },
+      "payload": {
+        "row_count": 1,
+        "rows": [
+          {
+            "handle": "ravi",
+            "role": "reviewer",
+            "since": "2025-09-01"
+          }
+        ]
+      },
+      "tool": "sqlite.query"
+    }
+  ],
+  "expect": "maintainers",
+  "kind": "bad",
+  "task": "t06",
+  "why": "the right person with the wrong role"
+}

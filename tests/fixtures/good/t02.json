@@ -1,0 +1,45 @@
+{
+  "answers": [
+    {
+      "args": {},
+      "payload": {
+        "tables": [
+          "commits",
+          "deps",
+          "incidents",
+          "labels",
+          "maintainers",
+          "releases",
+          "repos",
+          "scans"
+        ]
+      },
+      "tool": "sqlite.list_tables"
+    },
+    {
+      "args": {
+        "limit": 20,
+        "sql": "select id, repo, severity from incidents where repo = 'ghost/typo'"
+      },
+      "payload": {
+        "row_count": 0,
+        "rows": []
+      },
+      "tool": "sqlite.query"
+    },
+    {
+      "args": {
+        "limit": 20,
+        "sql": "select id, repo, severity from incidents where lower(repo) = lower('ghost/typo')"
+      },
+      "payload": {
+        "row_count": 0,
+        "rows": []
+      },
+      "tool": "sqlite.query"
+    }
+  ],
+  "kind": "good",
+  "task": "t02",
+  "why": "the governed run's delivery: every required fact, right values"
+}

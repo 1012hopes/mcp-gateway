@@ -1,0 +1,101 @@
+{
+  "answers": [
+    {
+      "args": {},
+      "payload": {
+        "tables": [
+          "commits",
+          "deps",
+          "incidents",
+          "labels",
+          "maintainers",
+          "releases",
+          "repos",
+          "scans"
+        ]
+      },
+      "tool": "sqlite.list_tables"
+    },
+    {
+      "args": {
+        "table": "incidents"
+      },
+      "payload": {
+        "columns": [
+          {
+            "name": "id",
+            "notnull": false,
+            "type": "INT"
+          },
+          {
+            "name": "repo",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "severity",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "opened_at",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "resolved_at",
+            "notnull": false,
+            "type": "TEXT"
+          }
+        ],
+        "table": "incidents"
+      },
+      "tool": "sqlite.describe_table"
+    },
+    {
+      "args": {
+        "limit": 50,
+        "sql": "select id, repo, severity from incidents where resolved_at is null order by id"
+      },
+      "payload": {
+        "row_count": 2,
+        "rows": [
+          {
+            "id": 2,
+            "repo": "maximhq/bifrost",
+            "severity": "sev3"
+          },
+          {
+            "id": 4,
+            "repo": "1012hopes/mcp-gateway",
+            "severity": "sev3"
+          }
+        ]
+      },
+      "tool": "sqlite.query"
+    },
+    {
+      "args": {
+        "limit": 50,
+        "sql": "select name, stars from repos where name in ('1012hopes/mcp-gateway', 'maximhq/bifrost') order by name"
+      },
+      "payload": {
+        "row_count": 2,
+        "rows": [
+          {
+            "name": "1012hopes/mcp-gateway",
+            "stars": 1
+          },
+          {
+            "name": "maximhq/bifrost",
+            "stars": 9100
+          }
+        ]
+      },
+      "tool": "sqlite.query"
+    }
+  ],
+  "kind": "good",
+  "task": "t01",
+  "why": "the governed run's delivery: every required fact, right values"
+}

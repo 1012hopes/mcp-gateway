@@ -1,0 +1,81 @@
+{
+  "answers": [
+    {
+      "args": {},
+      "payload": {
+        "tables": [
+          "commits",
+          "deps",
+          "incidents",
+          "labels",
+          "maintainers",
+          "releases",
+          "repos",
+          "scans"
+        ]
+      },
+      "tool": "sqlite.list_tables"
+    },
+    {
+      "args": {
+        "table": "repos"
+      },
+      "payload": {
+        "columns": [
+          {
+            "name": "name",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "stars",
+            "notnull": false,
+            "type": "INT"
+          },
+          {
+            "name": "language",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "last_commit",
+            "notnull": false,
+            "type": "TEXT"
+          }
+        ],
+        "table": "repos"
+      },
+      "tool": "sqlite.describe_table"
+    },
+    {
+      "args": {
+        "limit": 50,
+        "sql": "select name, stars, language from repos order by stars desc limit 3"
+      },
+      "payload": {
+        "row_count": 3,
+        "rows": [
+          {
+            "language": "Go",
+            "name": "maximhq/bifrost",
+            "stars": 9100
+          },
+          {
+            "language": "Rust",
+            "name": "coral-protocol/coral",
+            "stars": 5100
+          },
+          {
+            "language": "Python",
+            "name": "IBM/mcp-context-forge",
+            "stars": 4820
+          }
+        ]
+      },
+      "tool": "sqlite.query"
+    }
+  ],
+  "kind": "good",
+  "task": "t09",
+  "why": "the governed run's delivery: every required fact, right values"
+}

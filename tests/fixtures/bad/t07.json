@@ -1,0 +1,83 @@
+{
+  "answers": [
+    {
+      "args": {},
+      "payload": {
+        "tables": [
+          "commits",
+          "deps",
+          "incidents",
+          "labels",
+          "maintainers",
+          "releases",
+          "repos",
+          "scans"
+        ]
+      },
+      "tool": "sqlite.list_tables"
+    },
+    {
+      "args": {
+        "table": "scans"
+      },
+      "payload": {
+        "columns": [
+          {
+            "name": "id",
+            "notnull": false,
+            "type": "INT"
+          },
+          {
+            "name": "repo",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "tool",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "finding",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "severity",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "created_at",
+            "notnull": false,
+            "type": "TEXT"
+          }
+        ],
+        "table": "scans"
+      },
+      "tool": "sqlite.describe_table"
+    },
+    {
+      "args": {
+        "limit": 50,
+        "sql": "select tool, finding, severity, created_at from scans where repo = 'IBM/mcp-context-forge' order by created_at desc"
+      },
+      "payload": {
+        "row_count": 1,
+        "rows": [
+          {
+            "created_at": "2026-05-03",
+            "finding": "tool schema not validated",
+            "severity": "medium",
+            "tool": "semgrep"
+          }
+        ]
+      },
+      "tool": "sqlite.query"
+    }
+  ],
+  "expect": "scan",
+  "kind": "bad",
+  "task": "t07",
+  "why": "the scan's severity downgraded"
+}

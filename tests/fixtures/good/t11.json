@@ -1,0 +1,71 @@
+{
+  "answers": [
+    {
+      "args": {},
+      "payload": {
+        "tables": [
+          "commits",
+          "deps",
+          "incidents",
+          "labels",
+          "maintainers",
+          "releases",
+          "repos",
+          "scans"
+        ]
+      },
+      "tool": "sqlite.list_tables"
+    },
+    {
+      "args": {
+        "table": "maintainers"
+      },
+      "payload": {
+        "columns": [
+          {
+            "name": "repo",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "handle",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "role",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "since",
+            "notnull": false,
+            "type": "TEXT"
+          }
+        ],
+        "table": "maintainers"
+      },
+      "tool": "sqlite.describe_table"
+    },
+    {
+      "args": {
+        "limit": 50,
+        "sql": "select repo, handle, since from maintainers where role = 'triage' order by repo"
+      },
+      "payload": {
+        "row_count": 1,
+        "rows": [
+          {
+            "handle": "qa-bot",
+            "repo": "1012hopes/mcp-gateway",
+            "since": "2026-11-02"
+          }
+        ]
+      },
+      "tool": "sqlite.query"
+    }
+  ],
+  "kind": "good",
+  "task": "t11",
+  "why": "the governed run's delivery: every required fact, right values"
+}

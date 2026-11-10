@@ -1,0 +1,45 @@
+{
+  "answers": [
+    {
+      "args": {},
+      "payload": {
+        "tables": [
+          "commits",
+          "deps",
+          "incidents",
+          "labels",
+          "maintainers",
+          "releases",
+          "repos",
+          "scans"
+        ]
+      },
+      "tool": "sqlite.list_tables"
+    },
+    {
+      "args": {
+        "limit": 20,
+        "sql": "select repo from deps where package = 'left-pad'"
+      },
+      "payload": {
+        "row_count": 0,
+        "rows": []
+      },
+      "tool": "sqlite.query"
+    },
+    {
+      "args": {
+        "limit": 20,
+        "sql": "select repo from deps where lower(package) = 'left-pad'"
+      },
+      "payload": {
+        "row_count": 0,
+        "rows": []
+      },
+      "tool": "sqlite.query"
+    }
+  ],
+  "kind": "good",
+  "task": "t17",
+  "why": "the governed run's delivery: every required fact, right values"
+}

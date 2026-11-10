@@ -1,0 +1,60 @@
+{
+  "answers": [
+    {
+      "args": {},
+      "payload": {
+        "tables": [
+          "commits",
+          "deps",
+          "incidents",
+          "labels",
+          "maintainers",
+          "releases",
+          "repos",
+          "scans"
+        ]
+      },
+      "tool": "sqlite.list_tables"
+    },
+    {
+      "args": {
+        "table": "labels"
+      },
+      "payload": {
+        "columns": [
+          {
+            "name": "incident_id",
+            "notnull": false,
+            "type": "INT"
+          },
+          {
+            "name": "label",
+            "notnull": false,
+            "type": "TEXT"
+          }
+        ],
+        "table": "labels"
+      },
+      "tool": "sqlite.describe_table"
+    },
+    {
+      "args": {
+        "limit": 50,
+        "sql": "select label from labels where incident_id = 2 order by label"
+      },
+      "payload": {
+        "row_count": 1,
+        "rows": [
+          {
+            "label": "flakey"
+          }
+        ]
+      },
+      "tool": "sqlite.query"
+    }
+  ],
+  "expect": "labels",
+  "kind": "bad",
+  "task": "t08",
+  "why": "a misspelt label that is not in the table"
+}

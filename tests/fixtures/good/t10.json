@@ -1,0 +1,117 @@
+{
+  "answers": [
+    {
+      "args": {},
+      "payload": {
+        "tables": [
+          "commits",
+          "deps",
+          "incidents",
+          "labels",
+          "maintainers",
+          "releases",
+          "repos",
+          "scans"
+        ]
+      },
+      "tool": "sqlite.list_tables"
+    },
+    {
+      "args": {
+        "table": "incidents"
+      },
+      "payload": {
+        "columns": [
+          {
+            "name": "id",
+            "notnull": false,
+            "type": "INT"
+          },
+          {
+            "name": "repo",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "severity",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "opened_at",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "resolved_at",
+            "notnull": false,
+            "type": "TEXT"
+          }
+        ],
+        "table": "incidents"
+      },
+      "tool": "sqlite.describe_table"
+    },
+    {
+      "args": {
+        "limit": 50,
+        "sql": "select id, repo, severity from incidents where resolved_at is null order by id"
+      },
+      "payload": {
+        "row_count": 2,
+        "rows": [
+          {
+            "id": 2,
+            "repo": "maximhq/bifrost",
+            "severity": "sev3"
+          },
+          {
+            "id": 4,
+            "repo": "1012hopes/mcp-gateway",
+            "severity": "sev3"
+          }
+        ]
+      },
+      "tool": "sqlite.query"
+    },
+    {
+      "args": {
+        "limit": 50,
+        "sql": "select incident_id, label from labels order by incident_id, label"
+      },
+      "payload": {
+        "row_count": 6,
+        "rows": [
+          {
+            "incident_id": 1,
+            "label": "mcp"
+          },
+          {
+            "incident_id": 1,
+            "label": "regression"
+          },
+          {
+            "incident_id": 2,
+            "label": "flaky"
+          },
+          {
+            "incident_id": 3,
+            "label": "p1"
+          },
+          {
+            "incident_id": 4,
+            "label": "governance"
+          },
+          {
+            "incident_id": 4,
+            "label": "mcp"
+          }
+        ]
+      },
+      "tool": "sqlite.query"
+    }
+  ],
+  "kind": "good",
+  "task": "t10",
+  "why": "the governed run's delivery: every required fact, right values"
+}

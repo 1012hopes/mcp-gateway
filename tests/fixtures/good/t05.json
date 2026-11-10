@@ -1,0 +1,86 @@
+{
+  "answers": [
+    {
+      "args": {},
+      "payload": {
+        "tables": [
+          "commits",
+          "deps",
+          "incidents",
+          "labels",
+          "maintainers",
+          "releases",
+          "repos",
+          "scans"
+        ]
+      },
+      "tool": "sqlite.list_tables"
+    },
+    {
+      "args": {
+        "table": "deps"
+      },
+      "payload": {
+        "columns": [
+          {
+            "name": "repo",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "package",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "version",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "pinned",
+            "notnull": false,
+            "type": "INT"
+          },
+          {
+            "name": "vulnerable",
+            "notnull": false,
+            "type": "INT"
+          }
+        ],
+        "table": "deps"
+      },
+      "tool": "sqlite.describe_table"
+    },
+    {
+      "args": {
+        "limit": 50,
+        "sql": "select repo, package, version from deps where vulnerable = 1 order by repo, package"
+      },
+      "payload": {
+        "row_count": 3,
+        "rows": [
+          {
+            "package": "pydantic",
+            "repo": "IBM/mcp-context-forge",
+            "version": "2.6.0"
+          },
+          {
+            "package": "golang.org/x/crypto",
+            "repo": "maximhq/bifrost",
+            "version": "0.22.0"
+          },
+          {
+            "package": "golang.org/x/net",
+            "repo": "maximhq/bifrost",
+            "version": "0.24.0"
+          }
+        ]
+      },
+      "tool": "sqlite.query"
+    }
+  ],
+  "kind": "good",
+  "task": "t05",
+  "why": "the governed run's delivery: every required fact, right values"
+}

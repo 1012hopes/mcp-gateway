@@ -1,0 +1,51 @@
+{
+  "answers": [
+    {
+      "args": {},
+      "payload": {
+        "tables": [
+          "commits",
+          "deps",
+          "incidents",
+          "labels",
+          "maintainers",
+          "releases",
+          "repos",
+          "scans"
+        ]
+      },
+      "tool": "sqlite.list_tables"
+    },
+    {
+      "args": {
+        "limit": 20,
+        "sql": "select repo from releases where tag = 'v9.9.9'"
+      },
+      "payload": {
+        "row_count": 1,
+        "rows": [
+          {
+            "repo": "coral-protocol/coral",
+            "tag": "v9.9.9"
+          }
+        ]
+      },
+      "tool": "sqlite.query"
+    },
+    {
+      "args": {
+        "limit": 20,
+        "sql": "select repo from releases where lower(tag) = 'v9.9.9'"
+      },
+      "payload": {
+        "row_count": 0,
+        "rows": []
+      },
+      "tool": "sqlite.query"
+    }
+  ],
+  "expect": "does not exist",
+  "kind": "bad",
+  "task": "t18",
+  "why": "a release tag that was never published"
+}

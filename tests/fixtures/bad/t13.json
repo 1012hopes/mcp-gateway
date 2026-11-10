@@ -1,0 +1,102 @@
+{
+  "answers": [
+    {
+      "args": {},
+      "payload": {
+        "tables": [
+          "commits",
+          "deps",
+          "incidents",
+          "labels",
+          "maintainers",
+          "releases",
+          "repos",
+          "scans"
+        ]
+      },
+      "tool": "sqlite.list_tables"
+    },
+    {
+      "args": {
+        "table": "commits"
+      },
+      "payload": {
+        "columns": [
+          {
+            "name": "id",
+            "notnull": false,
+            "type": "INT"
+          },
+          {
+            "name": "repo",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "sha",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "author",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "committed_at",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "message",
+            "notnull": false,
+            "type": "TEXT"
+          }
+        ],
+        "table": "commits"
+      },
+      "tool": "sqlite.describe_table"
+    },
+    {
+      "args": {
+        "limit": 50,
+        "sql": "select repo, sha, committed_at from commits where committed_at > '2026-04-25' order by committed_at"
+      },
+      "payload": {
+        "row_count": 5,
+        "rows": [
+          {
+            "committed_at": "2026-04-28",
+            "repo": "IBM/mcp-context-forge",
+            "sha": "c3d4e5f"
+          },
+          {
+            "committed_at": "2026-04-28",
+            "repo": "maximhq/bifrost",
+            "sha": "d4e5f6a"
+          },
+          {
+            "committed_at": "2026-04-30",
+            "repo": "coral-protocol/coral",
+            "sha": "e5f6a7b"
+          },
+          {
+            "committed_at": "2026-11-06",
+            "repo": "1012hopes/mcp-gateway",
+            "sha": "f6a7b8c"
+          },
+          {
+            "committed_at": "2026-11-08",
+            "repo": "1012hopes/mcp-gateway",
+            "sha": "a7b8c9d"
+          }
+        ]
+      },
+      "tool": "sqlite.query"
+    }
+  ],
+  "expect": "commits",
+  "kind": "bad",
+  "task": "t13",
+  "why": "one of the five recent commits is missing"
+}

@@ -1,0 +1,110 @@
+{
+  "answers": [
+    {
+      "args": {},
+      "payload": {
+        "tables": [
+          "commits",
+          "deps",
+          "incidents",
+          "labels",
+          "maintainers",
+          "releases",
+          "repos",
+          "scans"
+        ]
+      },
+      "tool": "sqlite.list_tables"
+    },
+    {
+      "args": {
+        "table": "incidents"
+      },
+      "payload": {
+        "columns": [
+          {
+            "name": "id",
+            "notnull": false,
+            "type": "INT"
+          },
+          {
+            "name": "repo",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "severity",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "opened_at",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "resolved_at",
+            "notnull": false,
+            "type": "TEXT"
+          }
+        ],
+        "table": "incidents"
+      },
+      "tool": "sqlite.describe_table"
+    },
+    {
+      "args": {
+        "limit": 50,
+        "sql": "select id, repo, severity from incidents where severity in ('sev1', 'sev2') order by id"
+      },
+      "payload": {
+        "row_count": 2,
+        "rows": [
+          {
+            "id": 1,
+            "repo": "IBM/mcp-context-forge",
+            "severity": "sev2"
+          },
+          {
+            "id": 3,
+            "repo": "coral-protocol/coral",
+            "severity": "sev1"
+          }
+        ]
+      },
+      "tool": "sqlite.query"
+    },
+    {
+      "args": {
+        "limit": 50,
+        "sql": "select name, language from repos order by name"
+      },
+      "payload": {
+        "row_count": 4,
+        "rows": [
+          {
+            "language": "Python",
+            "name": "1012hopes/mcp-gateway"
+          },
+          {
+            "language": "Python",
+            "name": "IBM/mcp-context-forge"
+          },
+          {
+            "language": "Go",
+            "name": "maximhq/bifrost"
+          },
+          {
+            "language": "Python",
+            "name": "p1s4/mcp-search-proxy"
+          }
+        ]
+      },
+      "tool": "sqlite.query"
+    }
+  ],
+  "expect": "languages",
+  "kind": "bad",
+  "task": "t12",
+  "why": "the language of one affected repo is missing"
+}

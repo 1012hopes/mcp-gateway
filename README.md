@@ -7,7 +7,7 @@
 
 一句话概括差异化：**别的网关管"谁能调"，这个管"什么时候该停"，并且能证明那次停是对的。**
 
-> 状态：**D11 / D18**（轨迹层 + 多上游 + 生命周期 + 参数归一化 + 证据模型 + R1/R2/R3/R4/R6 + run 边界与脱敏 + 20 条任务与人工最优步数已跑通，430 tests；R5 危险动作、checker、指标表待做）。进度见 [`PLAN.md`](PLAN.md) 与 [`docs/progress.md`](docs/progress.md)。
+> 状态：**D12 / D18**（轨迹层 + 多上游 + 生命周期 + 参数归一化 + 证据模型 + R1/R2/R3/R4/R6 + run 边界与脱敏 + 20 条任务 + checker 与 **G3 指标表**已跑通，461 tests；R5 危险动作、选择器、回放视图待做）。进度见 [`PLAN.md`](PLAN.md) 与 [`docs/progress.md`](docs/progress.md)。
 
 ## 它解决什么问题
 
@@ -47,7 +47,7 @@ recursion_limit = 25  # LangGraph
 | D9 | 证据模型（来源 + 参数谓词 + 结果形状）+ R4 证据完备 + DEGRADED（**正常任务 9 步 → 4 步**） | ✅ 331 tests |
 | D10 | run 边界声明 + 先脱敏再哈希 + `tool_calls` 串行化（**同一串调用：声明了就继续，不声明就误停**） | ✅ 384 tests |
 | D11 | 20 条任务（14 生产 + 6 对抗）+ 人工最优步数 + 扫描表（**182 次调用 → 65 次，20/20 达标**） | ✅ 430 tests |
-| D12 | checker 自测 + **G3 指标表** | 待做 |
+| D12 | checker（20 条 + 40 个样本自测）+ **G3 指标表**（**误停率 0/20、20/20 停对、省 64.3% 调用**） | ✅ 461 tests |
 
 ## 快速开始
 
@@ -76,6 +76,12 @@ uv run python scripts/boundary_demo.py
 # D11：20 条任务 × (baseline, governed) 全跑一遍，写出 results/tasks.md
 #      任一条达不到 baseline >= optimal × 3 就以非零退出——任务集不能悄悄漂移
 uv run python scripts/task_sweep.py
+
+# D12：40 个样本自检（20 接受 + 20 拒绝），顺带重新生成 tests/fixtures/
+uv run python scripts/make_fixtures.py
+
+# D12/G3：对照实验 —— 20 条任务各跑两遍，产出 results/table.md（六项指标）
+uv run python scripts/experiment.py
 
 # G1 演示：正常运行 / 真实拔掉写权限 / 注入写盘失败
 uv run python scripts/failclosed_demo.py
@@ -259,6 +265,42 @@ degraded -- the tool that produces sql.rows.repos is not available
 - **"最优"是定规则后数出来的，不是量完回填的**：一次调用必须贡献至少一项 `required_evidence` 才算必要。逐条的最少调用路径在 [`docs/optimal-steps.md`](docs/optimal-steps.md)，包括两处已知代价（一次 join 能带回两个事实但只记一类；3 倍是筛选门槛而非研究发现）。
 - **对抗任务受控仍要 3 步**：一次空结果是"这次没有"，两次同样的空结果才是"再问也没用"。凭一次就断言不可答，会把"表里恰好没有"和"查询写错了"混为一谈。
 
+## checker 与 G3：数字是从哪来的
+
+**checker 是项目里唯一能说"答案对不对"的部件。** 证据模型证明"读过什么形状的行"，`sql.rows.repos` 并不保证星数没写错。每条任务一个纯函数（`tasks/checkers/`），输入是这次 run 交付的**全部**回答，输出 `ok` + 一句理由。
+
+```python
+def t01(answers):
+    incidents = project(facts(answers, "incidents"), ("id", "repo", "severity"))
+    verdict = conclude(incidents, T01_INCIDENTS, "unresolved incidents")
+    if not verdict.ok:
+        return verdict
+    stars = {r for r in project(facts(answers, "repos"), ("name", "stars")) if r[0] in T01_STARS}
+    return conclude(stars, set(T01_STARS.items()), "star counts of the affected repos")
+```
+
+一条命令出表（`scripts/experiment.py` → `results/table.md`，20 条各跑两遍）：
+
+| 指标 | 基线（`--no-rules`） | 网关（R1/R2/R3/R4/R6） |
+|---|---|---|
+| 停对了（步数在区间内 **且** checker 通过） | 0/20 | **20/20** |
+| 停早了（误停） | 0/20 | **0/20** |
+| 停晚了 | 20/20 | 0/20 |
+| **误停率**（early / 总任务数） | 0.0% | **0.0%** |
+| 调用数 | 182 | 65（省 64.3%） |
+| Accuracy@K † | 1.00 (n=182) | 1.00 (n=65) |
+
+† **这个 1.00 是构造出来的**：D14 之前没有选择器，`offered` 就是全部工具，正确工具必然在其中。保留这一行是为了 FR-7 的六项齐全，脚注说明它要到 A1 落地后才有信息量——印一个恒真值当结果是本项目要防的失败。
+
+四条口径值得单独读：
+
+- **对抗任务的区间中心是 `optimal + 2`，宽度仍 ±1**。`optimal = 1` 是信息论下界，但任何基于重复的判据最早只能在"第二个相同答案"处发火，还要加对抗策略读表结构那一步。照字面区间算，六个按设计停止的 run 会被全部判成"停晚"——那是区间中心没对齐。
+- **答错优先于步数**：checker 失败在任何长度都计为误停，否则"在正确步数上答错"会被记成停对了。表里单列 `answer` 列。
+- **`policy_exhausted` 计为停晚**：它是"想法用完了"，不是"被判定完成了"。
+- **`good` 样本不是手写的**，是真实运行的交付（`scripts/make_fixtures.py`）。生成时当场用 checker 判一次——这一步同时成了 checker 的第一道验收，D12 现场就抓到一条任务的期望少数了一行。
+
+自测 **40/40**：每条任务 20 个 `good`（必须接受）+ 20 个 `bad`（必须拒绝，且理由要对得上）。`bad` 全部是"声明的变异"——删一行、改一个值、编一行——不是把答案清空：一个空答案被拒说明不了任何事。
+
 ## run 边界：为什么它必须是声明的
 
 一个对话先问"未解决的事故"，再问别的事。如果第二个问题还在同一个 run 里：
@@ -342,6 +384,7 @@ gateway/
   session.py         RunSession：证据集 / 预算 / 调用历史 + 唯一写轨迹入口 + `next_run`
   boundary.py        run 边界声明（`_meta.gateway`）：解析、校验、**不推断**
   policy.py          脱敏：凭据键 + 凭据形态 -> 固定标记（在归一化之前）
+  metrics.py         A6 的六个指标：分类规则 + 聚合（无 I/O，可单测）
   stop/controller.py 停止控制器：排序、短路、attempted 日志（**不含任何判据**）
   stop/normalize.py  参数归一化：调用身份的唯一定义处（A2.1）
   evidence.py        证据模型：来源 + 参数谓词 + 结果形状 -> ev_type（纯函数）
@@ -365,6 +408,8 @@ mcp_servers/dirty_schema_server.py  故意不合规的上游（$ref / oneOf / �
 tasks/t01_unresolved_incidents.json 正常任务：唯一一条结果依赖的（reactive）
 tasks/t03..t15_*.json               13 条生产型：声明式计划 + required evidence
 tasks/t02,t16..t20_*.json           6 条对抗型：查不到的东西，问多少次都是空
+tasks/checkers/                     每任务一个 checker（core / productive / adversarial）
+tests/fixtures/{good,bad}/          40 个样本：20 个必须接受、20 个必须拒绝
 config/gateway.json                 上游、trace 目录、证据模型路径
 config/evidence.json                冻结的证据模型（谁能生产、问什么、什么形状）
 config/schema-manifest.json         冻结的工具契约（入库，改上游后重跑冻结）
@@ -374,6 +419,8 @@ scripts/g2_demo.py                  G2：打转任务 11 步 -> 3 步 + 8 项自
 scripts/evidence_demo.py            D9：R4 收束 + 答案检查 + DEGRADED + 12 项自检
 scripts/boundary_demo.py            D10：同一串调用，声明了就继续、不声明就误停 + 12 项自检
 scripts/task_sweep.py               D11：20 条任务 × (baseline, governed) -> results/tasks.md
+scripts/make_fixtures.py            D12：真实运行 -> good/bad 样本 + 当场互判（40/40）
+scripts/experiment.py               D12/G3：对照实验 -> results/table.md（六项指标）
 scripts/failclosed_demo.py          G1 的 S1/S2/S3
 scripts/tamper_demo.py              8 个篡改用例
 scripts/freeze_schema.py            冻结 / `--check` 检查 schema 漂移
@@ -415,6 +462,10 @@ docs/demo-g2.md                     G2 台词与录屏脚本
 - **串行化是进程内的一把锁**：它保证本进程的轨迹线性、证据集不竞态，但不解决多进程同时写同一 `trace_dir` 的问题（各自成链、互不干扰，但没有跨 run 的偏序）
 - **受控步数天然比最优多 1**：agent 常先 `describe_table` 再写 SQL，那一步不产生新事实却必须付钱。网关只在证据齐了的那次调用上收束，不会替 agent 判断"这次看起来没用"——那正是它拒绝替 agent 做的判断。`governed = optimal + 1` 是设计结果，不是判据漏了
 - **"基线 ≥ 最优 × 3"部分是任务挑选的结果**：20 条任务的基线是同一条再验尾部（重复上次查询 → count → describe → list_tables → 换 limit 再问），所以这条线筛掉的是"9 步 vs 8 步"这类测不出东西的任务，不是研究发现。真结论在两列的绝对差与"停在哪条规则上"
+- **checker 只认"行集"形状的答案**：`count_rows` 返回 `{"count": 0}` 也是"没有这一行"的合理表达，但 checker 看不见它。当前所有策略都用 `sqlite.query`，换一个只用 count 的 agent，五条对抗任务的 checker 会报"从没问过"
+- **checker 的期望是冻结的读数，不是从数据推出来的**：字面量表是读 seed 抄下来、再由真实运行校验的。好处是 seed 一改 good 样本立刻红；代价是它证明"与这份数据一致"，不证明"与问题意图一致"——后者只能靠人复核那几十行
+- **"主题词守卫"是子串匹配**：空行集只在查询文本里出现 `ghost`/`typo`/`triage` 之类的词时才算答案。一条既不写主体也不写名字的改写会让守卫失效，所以 `tests/test_checkers.py` 遍历任务文件里每一条改写在守这件事
+- **误停率的分母是 20 条任务**：一条误停就是 5%。表里报 0/20，不报"误停率 0.0% 所以没问题"——样本量只有这么大，能说的就这么多
 - 参数在 20 条任务上标定，样本量不做显著性检验，只报配对差值
 
 ## License

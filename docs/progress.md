@@ -14,6 +14,7 @@
 | D9（11-09） | 完成 | `gateway/evidence.py` + `config/evidence.json` + `rules/evidence_complete.py`（R4）+ `rules/unreachable.py`（R6，`DEGRADED`）；t01 **9 步 → 4 步**，R4 在最后一项证据到达处收束，checker 独立复核交付结果；缺生产者的配置 **1 步**收束、零上游调用；331 tests | D10：run 边界 + 脱敏顺序 + 串行化 |
 | D10（11-09） | 完成 | `gateway/boundary.py`（`_meta.gateway` 声明）+ `gateway/policy.py`（先脱敏再哈希）+ `session.next_run` + `handle_call_tool` 串行锁 + schema v2→v3（`task_id`）；`boundary_demo.py` **12 项自检全 PASS**：不声明 → 第二个话题被 R1 误停，声明 → 三 run 三文件、追问 `evidence_added=[]` 零重读、换题重新读；384 tests | D11：20 条任务集 + 人工最优步数 |
 | D11（11-09） | 完成 | 8 张表的演示库 + 9 个 `ev_type` + `agent/policy.py` 的 `DeclaredPolicy`（计划从数据来、再验尾部是同一段程序）+ 20 条任务（14 生产 + 6 对抗）+ `task_sweep.py`；**182 → 65 次调用（36%），20/20 满足 `baseline ≥ optimal × 3`**；430 tests | D12：checker 自测 + 指标表 |
+| D12（11-09） | 完成 | `tasks/checkers/`（20 条，core / productive / adversarial）+ `scripts/make_fixtures.py`（真实运行生成 40 个样本，**40/40**）+ `gateway/metrics.py` + `scripts/experiment.py` → `results/table.md`：**误停 0/20、20/20 停对、182 → 65 次调用（省 64.3%）**；461 tests | D13：三个脏上游 |
 
 ## D1 完成判据核对
 
@@ -293,3 +294,33 @@ old formula: steps where it would see an unchanged state: none
 27. **6 条对抗任务覆盖三种死路，但共用同一个信号**（答案逐字节重复）。这是刻意的：给每种死路配一条专用规则，结论就变成"我认得这六种情况"，而不是"平台期本身可判"。
 28. **`results/tasks.md` 作为生成物入库。** 它与 `traces/samples/` 同类：可复现、可 diff。某次改动让某条任务的步数变了，diff 里会直接看到，而不是等 D12 的指标表才发现"数字对不上"。
 29. **D10 遗留缺陷：`tests/test_run_boundary.py` 在类体里构造规则。** `rules: tuple = (DuplicateCall(),)` 是类体语句，import 期就执行，早于 `skipUnless`——裸解释器上直接 `NameError: name 'DuplicateCall' is not defined`，报的还是与依赖无关的错。这和 D9 修过的 `ScriptedPolicy` 是同一个坑，只是换了个文件，说明"类体里不碰受 SDK 守卫的名字"当时只修了现场、没写进规矩。改法相同：类体只声明**名字**（`rule_names`），`setUp` 里按需实例化。裸解释器现在 **298 tests / 0 error / 132 skipped**（原 279 / 1 error）。
+
+## D12 完成判据核对
+
+| 判据（`PLAN.md`） | 结果 |
+|---|---|
+| checker 自测 40/40（20 通过 + 20 拒绝） | `scripts/make_fixtures.py` 输出 `PASS: 40/40 samples (20 accepted, 20 refused)`；`tests/test_checkers.py::FixtureTests::test_all_forty_samples_behave` 逐条断言，另有 `test_every_refusal_names_the_reason_it_was_built_for` 要求拒绝理由里出现预声明的原因词 |
+| 产出 `results/table.md` | `scripts/experiment.py` 一条命令写盘：六项指标 + 20 条任务的逐行明细。**误停率 0/20、20/20 停对、182 → 65 次调用（省 64.3%）**；脚本对"有误停 / 基线答错 / 无法计算 Accuracy@K"以非零退出 |
+
+## D12 的六个发现
+
+**1. `good` 样本必须来自真实运行，否则它证明的是"我认为该答什么"。** 计划写的是"一个必然通过的结果"（手写 JSON）。手写等于把"运行答了 X"换成"我认为它该答 X"，两者一致到第一次不一致为止。改为用真实运行的交付生成，并在生成时当场用 checker 判一次——这一步立刻变成了 checker 的第一道验收：t13 的期望里我少数了一行（`IBM/mcp-context-forge` 的 `c3d4e5f` 也是 4-25 之后），生成的 good 样本被自己的 checker 拒了。**checker 会写错，而且错得和 agent 一样自然。**
+
+**2. checker 必须读"整次交付"，不能读最后一条答案。** `DeclaredPolicy` 的尾部会用 `limit 1` 复读同一个问题，只看最后一条等于给复读打分：t03 的 breaking 有两条，`limit 1` 只剩一条，一个正确的基线会被判成答错。所以 `facts()` 取并集。代价写在 `core.py` 的注释里：并集允许"两个截断答案拼成真相"，那是刻意选的宽松方向——如果 run 真的分两次交付了每一行，它就交付了答案。
+
+**3. "空集不是答案"这个坑第二次出现，这次在 checker 里。** 五条对抗任务的正确答案就是空行集，而 `facts()` 在"问了没有"和"根本没问"两种情况下都返回 `[]`。照直写，一个一次都没查过的 run 会全部通过。所以加了 `touched()`（至少有一次针对该表的查询），再加主题词守卫（那次查询确实在问这个主体）——后者是因为"对另一个问题得到空集"同样会被误接受。R4 在 D9 踩的是同一个坑的正面（空 required 集是任何集合的子集），一年两次说明这不是疏忽，是这类判据的固有形状。
+
+**4. 对抗任务的判定区间中心必须上移，而且必须写明这是偏离。** `optimal = 1` 对六条对抗任务成立，但它是**信息论**下界，不是**可判**下界：任何基于重复的判据最早只能在"第二个相同答案"处发火，还要加对抗策略读表结构那一步。照 A6 字面区间算，六个按设计停止的 run 会被全部判成"停晚"——20 条里 6 条误判，而错误出在区间而不是网关。改法只动中心、**不动宽度**（容差仍是 ±1），`optimal` 列保持下界不变，两列并排印在表里让人可以自己重算。`tests/test_metrics.py::BandTests::test_the_tolerance_stays_one_step_wide` 守着"不许用放宽容差的方式凑数字"。
+
+**5. 六项指标里有一项现在不可能有信息量，说实话比凑数重要。** Accuracy@K 要等 D14 的选择器：现在 `offered` 就是全目录，正确工具必然在其中，算出来恒为 1.00。保留这一行是因为 FR-7 要求六项齐全，但表里带脚注说明它按构造为真。一个恒真值被当成结果是本项目全部论证要防的那种失败——`DESIGN` 1.7 的 FR-7 那行因此从"六项齐"改成了"六项齐、五项有信息量"。
+
+**6. `bad` 样本必须是"声明的变异"，且拒绝理由要能对上。** 只断言"拒了"是不够的：一个把一切都拒掉的 checker 会通过全部 20 条 bad，而它对应的正是误停率 100%。所以每个 bad 样本带 `expect`，变异表（删一行 / 改一个值 / 编一行）与理由同处一表。另加 `test_the_bad_sample_is_not_simply_empty`：变异不能把答案清空——空答案被拒说明不了任何事。
+
+## D12 追加的六条偏差
+
+30. **`good` 样本是生成物，不是手写样本。** 计划（DESIGN 1.5）写"`good/`：一个必然通过的结果"，没规定谁来写。改成生成 + 当场自判，代价是它依赖一次真实运行（需要 SDK、需要库），收益是它同时成了 checker 的验收与 seed 漂移的哨兵。
+31. **checker 的输入形态是"整次交付"，计划未指定。** 选它是因为尾部会复读，任何"看最后一条"的实现都会给复读打分。`core.facts()` 因此是并集语义，不是覆盖语义。
+32. **A6 的对抗任务区间中心从 `optimal` 改为 `optimal + 2`**（宽度不变）。理由与代价都写进了 `DESIGN` 的 A6 与变更记录、`docs/optimal-steps.md` 第六节、`gateway/metrics.py` 的模块注释——同一件事写四处，因为它是最容易被读成"调参直到数字好看"的一处。
+33. **FR-7 记为"阶段性未达标"**：六项都在表里，但 Accuracy@K 要到 D14 才有信息量。没有把它写成"已满足"，也没有从表里删掉。
+34. **`tasks/checkers/` 拆成三个模块**（core / productive / adversarial）而不是一个文件。20 个检查函数 + 共享谓词 + 一个主题词表，塞进一个文件会让"哪段是接口、哪段是某条任务的期望"分不清。
+35. **`facts()` 的并集语义允许"两个截断答案拼成真相"。** 这是刻意选的宽松方向，写在 `core.py` 的 docstring 里：如果 run 分两次交付了每一行，它就交付了答案；反过来取"最后一条"会让正确基线因为尾部的 `limit 1` 被判错，那是更贵的错。

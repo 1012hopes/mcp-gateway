@@ -1,0 +1,52 @@
+{
+  "answers": [
+    {
+      "args": {},
+      "payload": {
+        "tables": [
+          "commits",
+          "deps",
+          "incidents",
+          "labels",
+          "maintainers",
+          "releases",
+          "repos",
+          "scans"
+        ]
+      },
+      "tool": "sqlite.list_tables"
+    },
+    {
+      "args": {
+        "limit": 20,
+        "sql": "select id, repo, severity from incidents where repo = 'ghost/typo'"
+      },
+      "payload": {
+        "row_count": 1,
+        "rows": [
+          {
+            "id": 9,
+            "repo": "ghost/typo",
+            "severity": "sev3"
+          }
+        ]
+      },
+      "tool": "sqlite.query"
+    },
+    {
+      "args": {
+        "limit": 20,
+        "sql": "select id, repo, severity from incidents where lower(repo) = lower('ghost/typo')"
+      },
+      "payload": {
+        "row_count": 0,
+        "rows": []
+      },
+      "tool": "sqlite.query"
+    }
+  ],
+  "expect": "does not exist",
+  "kind": "bad",
+  "task": "t02",
+  "why": "an incident for a repo that does not exist"
+}

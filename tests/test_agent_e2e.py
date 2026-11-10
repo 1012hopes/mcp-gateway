@@ -66,6 +66,7 @@ except ImportError:  # pragma: no cover
 if HAS_MCP:
     from agent import load_tasks, run_task_sync
     from agent.policy import Action, ScriptedPolicy
+    from tasks.checkers import answers_from_turns, check
 
 
 def _records(path: Path) -> list:
@@ -214,14 +215,10 @@ class CompleteRun(_RunMixin, unittest.TestCase):
     def test_the_checker_passes_on_the_delivered_result(self):
         # R4 proves the *shape* of knowledge, not its correctness. This is the
         # other half: the run stopped, and the answer it stopped on is right.
-        incidents = self.result.turns[2].payload["rows"]
-        self.assertEqual(
-            sorted(row["id"] for row in incidents), [2, 4], "the unresolved incidents"
-        )
-        stars = {row["name"]: row["stars"] for row in self.result.turns[-1].payload["rows"]}
-        self.assertEqual(
-            stars, {"maximhq/bifrost": 9100, "1012hopes/mcp-gateway": 1}
-        )
+        # Since D12 it is the same checker the metric table uses, so the two
+        # cannot drift into disagreeing about what "answered t01" means.
+        verdict = check("t01", answers_from_turns(self.result.turns))
+        self.assertTrue(verdict.ok, verdict.detail)
 
     def test_the_rules_version_names_the_installed_set(self):
         for record in self.records:

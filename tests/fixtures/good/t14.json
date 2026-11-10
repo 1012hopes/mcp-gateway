@@ -1,0 +1,99 @@
+{
+  "answers": [
+    {
+      "args": {},
+      "payload": {
+        "tables": [
+          "commits",
+          "deps",
+          "incidents",
+          "labels",
+          "maintainers",
+          "releases",
+          "repos",
+          "scans"
+        ]
+      },
+      "tool": "sqlite.list_tables"
+    },
+    {
+      "args": {
+        "table": "releases"
+      },
+      "payload": {
+        "columns": [
+          {
+            "name": "id",
+            "notnull": false,
+            "type": "INT"
+          },
+          {
+            "name": "repo",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "tag",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "published_at",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "breaking",
+            "notnull": false,
+            "type": "INT"
+          }
+        ],
+        "table": "releases"
+      },
+      "tool": "sqlite.describe_table"
+    },
+    {
+      "args": {
+        "limit": 50,
+        "sql": "select repo, tag, published_at, breaking from releases where tag = 'v0.9.0' order by repo"
+      },
+      "payload": {
+        "row_count": 2,
+        "rows": [
+          {
+            "breaking": 0,
+            "published_at": "2026-11-09",
+            "repo": "1012hopes/mcp-gateway",
+            "tag": "v0.9.0"
+          },
+          {
+            "breaking": 0,
+            "published_at": "2026-04-30",
+            "repo": "coral-protocol/coral",
+            "tag": "v0.9.0"
+          }
+        ]
+      },
+      "tool": "sqlite.query"
+    },
+    {
+      "args": {
+        "limit": 50,
+        "sql": "select name, stars from repos where name = '1012hopes/mcp-gateway'"
+      },
+      "payload": {
+        "row_count": 1,
+        "rows": [
+          {
+            "name": "1012hopes/mcp-gateway",
+            "stars": 1
+          }
+        ]
+      },
+      "tool": "sqlite.query"
+    }
+  ],
+  "kind": "good",
+  "task": "t14",
+  "why": "the governed run's delivery: every required fact, right values"
+}

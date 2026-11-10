@@ -1,0 +1,102 @@
+{
+  "answers": [
+    {
+      "args": {},
+      "payload": {
+        "tables": [
+          "commits",
+          "deps",
+          "incidents",
+          "labels",
+          "maintainers",
+          "releases",
+          "repos",
+          "scans"
+        ]
+      },
+      "tool": "sqlite.list_tables"
+    },
+    {
+      "args": {
+        "table": "incidents"
+      },
+      "payload": {
+        "columns": [
+          {
+            "name": "id",
+            "notnull": false,
+            "type": "INT"
+          },
+          {
+            "name": "repo",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "severity",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "opened_at",
+            "notnull": false,
+            "type": "TEXT"
+          },
+          {
+            "name": "resolved_at",
+            "notnull": false,
+            "type": "TEXT"
+          }
+        ],
+        "table": "incidents"
+      },
+      "tool": "sqlite.describe_table"
+    },
+    {
+      "args": {
+        "limit": 50,
+        "sql": "select repo from incidents where resolved_at is null order by repo"
+      },
+      "payload": {
+        "row_count": 2,
+        "rows": [
+          {
+            "repo": "1012hopes/mcp-gateway"
+          },
+          {
+            "repo": "maximhq/bifrost"
+          }
+        ]
+      },
+      "tool": "sqlite.query"
+    },
+    {
+      "args": {
+        "limit": 50,
+        "sql": "select name from repos order by name"
+      },
+      "payload": {
+        "row_count": 4,
+        "rows": [
+          {
+            "name": "1012hopes/mcp-gateway"
+          },
+          {
+            "name": "IBM/mcp-context-forge"
+          },
+          {
+            "name": "coral-protocol/coral"
+          },
+          {
+            "name": "maximhq/bifrost"
+          }
+        ]
+      },
+      "tool": "sqlite.query"
+    }
+  ],
+  "expect": "without",
+  "kind": "bad",
+  "task": "t15",
+  "why": "a repo dropped from the catalogue, so it vanishes from the difference"
+}

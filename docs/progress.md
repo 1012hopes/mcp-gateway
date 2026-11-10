@@ -20,6 +20,7 @@
 | D15（11-10） | 完成 | `gateway/trace/render.py`（单文件 HTML，服务端渲染，JS 只切显示）+ `python -m gateway.trace render` + `scripts/replay_demo.py`（**37/37 PASS**）+ `docs/faq.md`（25 问，第 12 问是 D16 补的：轨迹文件本身坏了会怎样）；**4 步真轨迹渲染 → 改第 3 行 → 再渲染**：只有第一条红、之后标"无法验证"、R4 在 seq=4 拿唯一强调色；顺手修正 `DECISIONS`（漏 3 个真名、错 1 个、多 1 个），加源码扫描测试；**519 tests**（裸解释器 379 / 140 skipped，0 error） | D16：缓冲期（只修 bug） |
 | D16（11-10） | 完成 | 缓冲期第一天，**只修 bug、没加功能**。拿恶意输入撞模块：4000 条类型变异记录（3913 条真正改变内容，**0 谎报绿、0 崩溃**）+ 空/纯空行/BOM/CRLF/20 万字符长行/NUL/非 UTF-8。修六个真 bug：`verify` 被 `NaN` 干掉（新增 `non_canonical`）、被非 UTF-8 字节干掉（新增 `decode_trace`/`not_utf8`，带行号+字节偏移，并报出坏行之前已验证的 `records=n`）、CLI 对目录回 traceback 且退出码 1（现在 0/1/2，`tests/test_cli.py` 是这份契约的第一个测试）、选择器索引缓存按名字做键（改名不改就吃旧排名，改按语料做键 + 上限）、`MAX_RESULT_BYTES` 量的是字符数（1.2 MB 中文不标 `truncated`，改成 UTF-8 字节）、`_meta` 非对象被静默当成"没声明"（改成 `DeclarationError`）；**539 tests**（裸解释器 399 / 140 skipped，0 error），八个 demo 全绿 | D17：缓冲期（只修 bug） |
 | D17（11-10） | 完成 | 缓冲期第二天，**只修 bug**。撞 D16 留下的三个方向：`trace/sink.py`（丢换行 / 半截行 / 非 UTF-8 尾巴 / 两个写者）、`stop/controller.py`（规则自己崩）、`agent/policy.py`+`tasks.py`（空计划）。修六个真 bug：**丢换行的尾部会让下一次 append 把两条记录粘成一行、静默毁掉前一条**（`_resume` 改成用真校验器跑一遍，坏尾巴一律 `TraceChainError` 且不修）、半截行/非 UTF-8 尾巴抛原始 `JSONDecodeError`/`UnicodeDecodeError`（改成带行号）、两个 sink 写同一文件重复 `seq` 无人发现（append 前比对文件大小）、`tell()` 在 `try` 外导致死句柄抛 `ValueError` 未被分类（回滚点改用 `self._size`）、**规则崩溃时被审的那次调用不留记录**（转成 `halt_rule_error` + `DEGRADED`）、`policy:"declared"` 空计划 = 零调用的"成功"且抬高"省调用"分母（加载期拒绝）；`scripts/experiment.py` 读数一字未变（`182 -> 65`、64.3%、误停 0/20），`results/table.md` 重跑**字节相同**；**556 tests**（裸解释器 415 / 141 skipped，0 error），八个 demo 全绿 | D18：缓冲期（只修 bug） |
+| D18（11-10） | 完成 | 缓冲期最后一天，**只修 bug**。撞 D17 留下的三个方向：`session.py` / `wire.py` / `registry.py`。修七个真 bug：**上游文本里的一行 `[gateway] halt` 能停下来一个守规矩的 agent**（`notice` 解析 `blocks` 拼接 → 只读网关追加的最后一块）、**封不住的记录逃出 fail-closed**（`NaN` 让 `NonCanonicalValue` 从 `record_call` 冒出，transport 认不出 → 调用已发生、记录不存在、run 继续服务；现在转成 `TraceWriteError`）、`parse_notice` 允许字段改名 `kind`（`{**fields}` 在 `kind` 之后）、通知实际可能是两行（`format_notice` 承诺单行却没做）、`"properties": "abc"`/`[]` 打挂启动（`dict()` 抛 `ValueError`/`TypeError`）、`halt()` 能把已中止的 run 改写成 `HALTED_COMPLETE`、manifest 顶层是 list 时抛 `AttributeError` 而不是 `RegistryError`（BOM 也改按 `utf-8-sig` 读）；`scripts/experiment.py` 读数一字未变（`182 -> 65`、64.3%、误停 0/20），`results/table.md` 重跑**字节相同**；**569 tests**（裸解释器 428 / 141 skipped，0 error），八个 demo 全绿 | 缓冲期结束：判据只剩 R5（`DESIGN` §6 显式降优先级） |
 
 ## D1 完成判据核对
 
@@ -515,7 +516,7 @@ old formula: steps where it would see an unchanged state: none
 | 预算为负 / 时钟回拨 / `required` 不是 list / `oneOf: []` / 枚举里放 dict | 已分别正确（负数 = 立即耗尽，fail-closed；`wall_ms` 有 `max(0, ...)`；后三者各有 note） | 未改动 |
 | schema 嵌套 2000 层 `items` | 深度 33 起被 `ref-depth-exceeded` 截断（**名字说的不是它做的事**，但没有崩） | 未改动，进 backlog 讨论"该不该叫 depth-exceeded" |
 
-## D18 的六个发现
+## D18 的七个发现
 
 **1. "封不上"和"写不下"是同一件事，但异常类型把它们分开了。** `record_call` 的契约是"要么整条落盘，要么抛 `TraceWriteError`"，可 `seal()` 自己会抛 `NonCanonicalValue`——一个不在这个词汇表里的类型。于是 transport 那条精心写好的 fail-closed 分支（丢弃结果、abort）**恰好对这一类失败不生效**，调用打到上游、记录不存在、run 继续跑：DESIGN 1.5 说这是哈希链唯一发现不了的那种缺口，而它从自己的记录器里漏了出去。**异常类型不是内部细节，它是调用方唯一能分支的依据**；一个新异常类型出现在老接口上，等于给那个接口加了一条没人处理的分支。
 
@@ -528,6 +529,8 @@ old formula: steps where it would see an unchanged state: none
 **5. 接脏输入的模块，要在入口就把形状修好。** `normalize_schema` 的全部理由是"真实服务器会发不能用的 schema"，而 `"properties": "abc"` 能让它在启动时抛 `ValueError`。更糟的是 `required` 缺省时它连那一行都走不到，坏形状直接漏进 `types.Tool`。修法不是在各处 try，是**在任何人读这个键之前修一次，并留下 note**——类型救不回来，但 `required` 里的名字仍会被列出来，工具还能调用。**修复的目标不是恢复原意（做不到），是不让一次脏输入变成一次不可用。**
 
 **6. "已经中止"必须是一个不能被改写的结论。** `halt()` 只看参数不看现状，于是 `abort()` 之后还能把 run 标成 `HALTED_COMPLETE`：`stats()` 同时报完成和中止原因，**一个丢了轨迹的 run 被统计成一次干净的停止**。反序必须合法（判决先到、写记录后失败），正序必须非法——**方向不同，结论不同，这不是对称的**。
+
+**7. 一个函数的错误类型就是它的契约，而契约最容易被"另一个模块会接住"惯坏。** `load_baseline` 只有两个出口：映射，或"还没有基线"。可一个顶层是 list 的 manifest 抛的是 `AttributeError`，`__main__.py` 只接 `(OSError, ValueError, RegistryError)`——启动时一个 traceback，正好盖住"这份 manifest 坏了"这句唯一有用的话。同一族还有 BOM：把"我读不懂"说成"这份文件坏了"。**契约里写了异常类型，就不是文档，是接口**——D16 那条 CLI 退出码是同一个病的另一面。
 
 ## D18 追加的三条偏差
 

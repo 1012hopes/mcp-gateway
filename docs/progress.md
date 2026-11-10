@@ -19,6 +19,7 @@
 | D14（11-10） | 完成 | `gateway/selector.py`（BM25，`enriched` 索引，K=5、M=10、pin 占槽位不放宽）+ `mcp_servers/catalog_server.py` / `wiki_server.py` / `gh_server.py`（30 个工具）+ `agent/loop.py` 每轮重取 `tools/list`；`gating_demo.py` **16/16 PASS**：**Accuracy@5 全量 1.00 → 窗口 1.00（下降 0%）**、20/20 答案不变、`outside-window 0/65`、schema **14578 → 1920 字节/轮（省 87%）**、`pins 43/43`；`test_selector` 22 例 + `test_gating` 5 例；**495 tests**（裸解释器 355 / 140 skipped，0 error） | D15：回放视图 + README |
 | D15（11-10） | 完成 | `gateway/trace/render.py`（单文件 HTML，服务端渲染，JS 只切显示）+ `python -m gateway.trace render` + `scripts/replay_demo.py`（**37/37 PASS**）+ `docs/faq.md`（25 问，第 12 问是 D16 补的：轨迹文件本身坏了会怎样）；**4 步真轨迹渲染 → 改第 3 行 → 再渲染**：只有第一条红、之后标"无法验证"、R4 在 seq=4 拿唯一强调色；顺手修正 `DECISIONS`（漏 3 个真名、错 1 个、多 1 个），加源码扫描测试；**519 tests**（裸解释器 379 / 140 skipped，0 error） | D16：缓冲期（只修 bug） |
 | D16（11-10） | 完成 | 缓冲期第一天，**只修 bug、没加功能**。拿恶意输入撞模块：4000 条类型变异记录（3913 条真正改变内容，**0 谎报绿、0 崩溃**）+ 空/纯空行/BOM/CRLF/20 万字符长行/NUL/非 UTF-8。修六个真 bug：`verify` 被 `NaN` 干掉（新增 `non_canonical`）、被非 UTF-8 字节干掉（新增 `decode_trace`/`not_utf8`，带行号+字节偏移，并报出坏行之前已验证的 `records=n`）、CLI 对目录回 traceback 且退出码 1（现在 0/1/2，`tests/test_cli.py` 是这份契约的第一个测试）、选择器索引缓存按名字做键（改名不改就吃旧排名，改按语料做键 + 上限）、`MAX_RESULT_BYTES` 量的是字符数（1.2 MB 中文不标 `truncated`，改成 UTF-8 字节）、`_meta` 非对象被静默当成"没声明"（改成 `DeclarationError`）；**539 tests**（裸解释器 399 / 140 skipped，0 error），八个 demo 全绿 | D17：缓冲期（只修 bug） |
+| D17（11-10） | 完成 | 缓冲期第二天，**只修 bug**。撞 D16 留下的三个方向：`trace/sink.py`（丢换行 / 半截行 / 非 UTF-8 尾巴 / 两个写者）、`stop/controller.py`（规则自己崩）、`agent/policy.py`+`tasks.py`（空计划）。修六个真 bug：**丢换行的尾部会让下一次 append 把两条记录粘成一行、静默毁掉前一条**（`_resume` 改成用真校验器跑一遍，坏尾巴一律 `TraceChainError` 且不修）、半截行/非 UTF-8 尾巴抛原始 `JSONDecodeError`/`UnicodeDecodeError`（改成带行号）、两个 sink 写同一文件重复 `seq` 无人发现（append 前比对文件大小）、`tell()` 在 `try` 外导致死句柄抛 `ValueError` 未被分类（回滚点改用 `self._size`）、**规则崩溃时被审的那次调用不留记录**（转成 `halt_rule_error` + `DEGRADED`）、`policy:"declared"` 空计划 = 零调用的"成功"且抬高"省调用"分母（加载期拒绝）；`scripts/experiment.py` 读数一字未变（`182 -> 65`、64.3%、误停 0/20），`results/table.md` 重跑**字节相同**；**556 tests**（裸解释器 415 / 141 skipped，0 error），八个 demo 全绿 | D18：缓冲期（只修 bug） |
 
 ## D1 完成判据核对
 
@@ -465,5 +466,36 @@ old formula: steps where it would see an unchanged state: none
 57. **`not_utf8` 额外报出 `records=n`**（坏行之前已验证的记录数）。判据只要求"能定位"，多加这个数字是因为审稿人真正要问的是"这份文件还剩多少可信"。代价是多一次前缀校验（O(n) 且只在文件已坏时发生）。
 58. **选择器缓存加了上限（8 个语料，FIFO 淘汰）**。按语料做键之后，一个持续漂移的上游每轮都会产生新键，字典就成了长期进程里的慢性泄漏。**改一个 bug 时要把它的新失效模式一起想掉**——否则只是把崩溃换成了泄漏。
 59. **第六个 bug 在 tag `v0.15-d16` 之后才撞出来**（补齐边界层审计时），单独一个 commit。前五个修完就打点，然后按"还剩哪层没撞过"继续推进——`boundary.py` 当时只读过、没喂过输入。**记录这件事本身也是判据的一部分**：如果文档写"五个"而实际六个，那就回到了这个项目最反对的那种状态——产物与描述不一致。`539 tests`（裸解释器 399 / 140 skipped）。
+
+## D17 完成判据核对
+
+缓冲期没有新判据，验收仍是那句话：**只修 bug，且每个 bug 都有一条会红的测试**。这一轮撞的是 D16 收工时点出的三个方向。
+
+| 输入 | 修之前 | 现在 |
+|---|---|---|
+| 文件以 `..."turn":2}` 结尾（崩在写 `\n` 之前），再打开续写 | 读出 `seq=2`，把新记录贴在 `}` 后 → **两条记录粘成一行，前一条无法解析，无人报错** | `TraceChainError: the last line has no terminating newline`，字节不动；提示"若确认这条记录完整，请手工补一个换行" |
+| 文件尾部是半截 JSON | 原始 `JSONDecodeError` 冒出 `_resume` | `TraceChainError`，带行号 |
+| 文件尾部有非 UTF-8 字节 | 原始 `UnicodeDecodeError` | `TraceChainError: line 3 is not UTF-8 (not_utf8)` |
+| 尾部被改过一个字段 | 照样续写，新记录的 `prev_hash` 指向一个不描述任何东西的哈希 | `TraceChainError`，带 `hash_mismatch` 与行号 |
+| 两个 sink 打开同一个文件 | 都以同一 `seq` 恢复、都写入，链里多一条重复，事后报成 `seq_gap` | 后动手的那个拒绝（`grew from 0 to 707 bytes`），磁盘上那一条仍校验通过 |
+| 文件被截短 | 续写到错误偏移 | 拒绝（`shrank`） |
+| sink 的句柄已被关闭 | `ValueError: I/O operation on closed file` 从 `tell()` 抛出，**未分类**；sink 仍"健康"、记录丢失 | `TraceWriteError (ValueError)`，sink 中毒，文件 0 字节 |
+| 规则 `check()` 抛 `ZeroDivisionError` | 异常穿过 `_handle_call`（**在 `record_call` 之前**）→ 被审的那次调用**零条记录** | `decision=halt_rule_error`、`state=DEGRADED`、一条记录、`stop_check.rule` 指名规则；`KeyboardInterrupt` 仍照常抛出 |
+| `policy:"declared"` + 空 `plan` | 第一轮返回 `None` → 0 次调用、0 条记录、`steps=0`，无任何报错 | 加载期 `ValueError`：声明了计划却不计划任何事 |
+| `list_tables` 返回字符串 / 对象数组 / `rows` 不是对象 | 已能退化（当作没有表、当作没有行） | 未改动，写进探针防回归 |
+
+## D17 的六个发现
+
+**1. "追加"能犯的最重的错，是改写了不是自己写的字节。** 丢一个换行的尾部，恢复时被当成完整记录，新记录贴在它后面，前一条从"可解析"变成"不可解析"——**一次 append 毁掉了更早的一条记录**，而且没有任何东西报错。这是写入器唯一的越界行为，所以修法不是"更小心地读最后一行"，而是**续写必须先证明这份文件值得续写**（跑一遍真校验器），并且**任何情况下都不去修它**：修一次，它就成了改写他人字节的地方，那是这个模块全部的立身之本。
+
+**2. 防御性的 `try` 要把获取现场的那一步也包进去。** `tell()` 被留在 `try` 外面，于是"句柄已死"这个最该被分类的失败恰好逃出了分类——记录没写、sink 仍健康、调用者拿到一个没人认领的 `ValueError`。修法不是补一层 `except`，是**让回滚点在失败之前就已确定**（用 `self._size`，只追加契约下它就等于文件末尾）。**依赖一个会失败的调用去准备失败时的退路，是把退路也一起赌上。**
+
+**3. 一个崩溃如果不能被记录，它就变成了"这次调用从未发生"。** 规则崩溃时异常在 `record_call` 之前逃出，于是轨迹里少一条。这份设计明确说"未被记录的调用是唯一的盲点"，而它自己的扩展点（规则）就是产生这个盲点的入口。**扩展点的失败必须走正常路径，不能走异常路径**——转成判决，让写记录那段代码照常跑。
+
+**4. 分母为 0 的任务看起来像最优解。** 声明了 `policy:"declared"` 却没有计划，run 以 0 次调用"成功"结束：主张的指标（省调用）把它算成完美，实际是把任务从实验里删掉了。**"什么都没做"和"做完了"必须能被区分**，方法是在加载期就拒绝，而不是在报表里解释。
+
+**5. 注释里的因果要先量再写。** 我给 `except Exception` 写的理由是"代理项在 `write()` 抛 `UnicodeEncodeError`"。探针一跑就否了：`seal()` 早就把代理项拒了，那个异常到不了写入器；真正到达的是死句柄（发现 2）。**一个看似有据的错误解释，比没有解释更坏**——后来的读者会照着它去改错的地方。
+
+**6. 有些性质在平台上测不了，就别写成测得了。** "文件被替换"这条用例在 Windows 上根本跑不起来（打开的句柄删不掉），而且检查本身就是按大小做的，**同名同大小的替换本来就能过**。删掉这条用例，把"这个检查只能发现大小漂移"写进注释：**测代码真有的性质，不测名字暗示的性质。** 同一类还有一处纯测试错误——`tearDown` 里清临时目录而句柄未关，Windows 报 `WinError 32`，读起来像用例失败而用例其实通过了；改成 `addCleanup`（逆序执行）。
 
 

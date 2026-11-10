@@ -18,6 +18,10 @@ traces/*
 *.db
 *.db-journal
 
+# 回放视图的演示产物：每次跑 run_id 都不同，入库只会制造噪音
+# （要看就 `python scripts/replay_demo.py`，它会把路径打出来）
+results/replay/
+
 # 演示用的种子数据库
 var/
 

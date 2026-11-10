@@ -92,22 +92,34 @@ RUN_STATES = frozenset(
     }
 )
 
-#: DESIGN 2.4 decision names. ``forward_outside`` (D14) is the one case where a
-#: call reached the upstream although the gating window did not show it: the
-#: window is an attention device, and recording the miss is the alternative to
-#: either hiding it or turning it into a failed task.
-DECISIONS = frozenset(
-    {
-        "forward",
-        "forward_outside",
-        "block_policy",
-        "block_duplicate",
-        "halt_complete",
-        "halt_no_progress",
-        "halt_budget",
-        "waiting_approval",
-    }
-)
+#: DESIGN 2.4 decision names, **by the module that writes them**. This mapping
+#: is the authoritative list; ``DECISIONS`` is derived from it so the two cannot
+#: disagree.
+#:
+#: It used to disagree with reality. The set named ``halt_complete`` where
+#: ``rules/evidence_complete.py`` writes ``halt_evidence_complete``, omitted
+#: ``halt_duplicate`` and both ``block_*`` refusals, and listed a
+#: ``waiting_approval`` decision that only exists as a *state*. Nothing caught
+#: it because nothing read the set: a declaration no code consumes drifts
+#: exactly like a schema nobody freezes. What surfaced it was the D15 viewer,
+#: which had to draw whatever string it found in the file and therefore could
+#: not silently assume this list was right. ``tests/test_record.py`` now greps
+#: the source for decision literals and fails if one is missing here.
+DECISION_SOURCES = {
+    "forward": "transport: the call reached the upstream",
+    "forward_outside": "transport: it reached the upstream although the window "
+    "did not show it (D14 -- attention, not permission)",
+    "halt_duplicate": "rules/duplicate.py (R1)",
+    "halt_no_progress": "rules/no_progress.py (R2)",
+    "halt_budget": "rules/budget.py (R3)",
+    "halt_evidence_complete": "rules/evidence_complete.py (R4)",
+    "halt_evidence_unreachable": "rules/unreachable.py (R6)",
+    "block_declaration": "transport: unusable _meta.gateway.task",
+    "block_unknown_tool": "transport: name is not in the current window",
+    "block_schema_drift": "transport: the tool is frozen by a contract change",
+}
+
+DECISIONS = frozenset(DECISION_SOURCES)
 
 
 def genesis_hash(run_id: str) -> str:

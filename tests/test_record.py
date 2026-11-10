@@ -2,6 +2,7 @@
 
 import json
 import unittest
+from pathlib import Path
 
 from gateway.trace.record import (
     CURRENT_SCHEMA_VERSION,
@@ -205,6 +206,73 @@ class ValidationTests(unittest.TestCase):
     def test_empty_run_id_has_no_genesis(self):
         with self.assertRaises(ValueError):
             genesis_hash("")
+
+
+class DecisionNamesTests(unittest.TestCase):
+    """The declared decision set must cover every name the code can write.
+
+    This is the invariant that was missing for eleven days: ``DECISIONS``
+    named ``halt_complete`` while the rule wrote ``halt_evidence_complete``,
+    omitted ``halt_duplicate``, and invented ``waiting_approval``. Nothing read
+    the set, so nothing complained. The D15 viewer reads whatever string is in
+    the file, which is what made the gap visible -- a consumer is what turns a
+    declaration into a claim.
+    """
+
+    GATEWAY = Path(__file__).resolve().parents[1] / "gateway"
+
+    def _written_literals(self):
+        """Every literal decision this code can put in a record."""
+        import re
+
+        found = {}
+        for path in sorted(self.GATEWAY.rglob("*.py")):
+            if path.name == "record.py":
+                continue  # the declaration itself, not a producer
+            text = path.read_text(encoding="utf-8")
+            for match in re.finditer(r'\bdecision\s*=\s*"([a-z_]+)"', text):
+                found.setdefault(match.group(1), set()).add(path.name)
+            for match in re.finditer(r'_Blocked\(\s*"([a-z_]+)"', text):
+                found.setdefault(match.group(1), set()).add(path.name)
+        return found
+
+    def test_every_written_decision_is_declared(self):
+        from gateway.trace.record import DECISIONS
+
+        written = self._written_literals()
+        self.assertTrue(written, "扫不到任何 decision 字面量，正则失效了？")
+        undeclared = sorted(name for name in written if name not in DECISIONS)
+        self.assertEqual(
+            undeclared,
+            [],
+            "这些 decision 真的会被写进轨迹，但 DECISIONS 里没有："
+            f"{ {name: sorted(written[name]) for name in undeclared} }",
+        )
+
+    def test_every_declared_decision_has_a_producer(self):
+        from gateway.trace.record import DECISION_SOURCES, DECISIONS
+
+        written = self._written_literals()
+        # ``forward`` is returned as a tuple element, not assigned, so the grep
+        # cannot see it; it is the one name allowed to be declared without a
+        # literal of that shape.
+        harmless = {"forward"}
+        orphaned = sorted(
+            name for name in DECISIONS if name not in written and name not in harmless
+        )
+        self.assertEqual(
+            orphaned, [], f"DECISIONS 里这些名字没有任何模块会写：{orphaned}"
+        )
+        self.assertEqual(set(DECISION_SOURCES), set(DECISIONS))
+
+    def test_the_two_names_that_were_wrong(self):
+        """Pin the specific mistakes so they cannot quietly come back."""
+        from gateway.trace.record import DECISIONS
+
+        self.assertIn("halt_evidence_complete", DECISIONS)
+        self.assertIn("halt_duplicate", DECISIONS)
+        self.assertNotIn("halt_complete", DECISIONS)
+        self.assertNotIn("waiting_approval", DECISIONS)
 
 
 if __name__ == "__main__":

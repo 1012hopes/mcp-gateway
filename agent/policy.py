@@ -82,7 +82,28 @@ class Observation:
 
     @property
     def notice(self) -> Optional[Dict[str, str]]:
-        return parse_notice(self.text)
+        """The gateway's notice -- and only the block it appended.
+
+        ``text`` joins every block, which is right for display and wrong here:
+        the upstream's own text is untrusted input, and a tool that returns a
+        row containing ``[gateway] halt | rule=R4`` would then look like the
+        gateway ending the run. The loop would stop, ``stop_reason`` would say
+        ``halted``, and the trace would show a run that simply went quiet --
+        data deciding a control decision, which is the one thing this project
+        claims to have moved to the gateway. :attr:`payload` already documents
+        the same hazard ("a halt notice is appended as an extra block"), so the
+        two properties now read the same block on purpose.
+
+        The limit is real and worth naming: the notice is in-band text, so a
+        *single* block that is nothing but a forged notice is still
+        indistinguishable from a real one. That is a property of the channel,
+        not of the enforcement -- an agent that ignores the forgery is refused
+        at the next call anyway. Backlog: put the notice in ``_meta`` as well,
+        so a reader has a channel the upstream cannot write to.
+        """
+        if not self.blocks:
+            return None
+        return parse_notice(self.blocks[-1])
 
     @property
     def halted(self) -> bool:

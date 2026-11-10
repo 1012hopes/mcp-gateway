@@ -53,6 +53,22 @@ class NoticeFormatTests(unittest.TestCase):
         self.assertEqual(parsed["kind"], "halt")
         self.assertEqual(parsed["state"], "HALTED_COMPLETE")
 
+    def test_a_multiline_reason_still_fits_on_one_line(self):
+        # The format promises one line. Rule messages and exception text are
+        # prose, and a newline used to produce a second, unlabelled line that
+        # the parser dropped -- so the transcript gained text nobody wrote.
+        text = format_notice(KIND_HALT, state="HALTED_BUDGET", reason="a\nb\r\nc")
+        self.assertNotIn("\n", text)
+        self.assertNotIn("\r", text)
+        self.assertEqual(parse_notice(text)["reason"], "a b c")
+
+    def test_a_field_cannot_rename_the_notice(self):
+        # Merging the fields over ``kind`` let a line in a tool result decide
+        # which kind of notice it was.
+        parsed = parse_notice(f"{NOTICE_PREFIX} halt | kind=closed | rule=R4")
+        self.assertEqual(parsed["kind"], "halt")
+        self.assertEqual(parsed["rule"], "R4")
+
     def test_plain_result_is_not_a_notice(self):
         self.assertIsNone(parse_notice('{"rows": []}'))
         self.assertIsNone(parse_notice(""))

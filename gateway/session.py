@@ -48,9 +48,9 @@ from typing import Any, Dict, List, Mapping, Optional, Set
 from .limits import Budget, CallSignature
 from .policy import redact
 from .stop.normalize import normalize_args, spec_for
-from .trace.canonical import digest_of
+from .trace.canonical import NonCanonicalValue, digest_of
 from .trace.record import StopCheck, TraceRecord
-from .trace.sink import JsonlSink
+from .trace.sink import JsonlSink, TraceWriteError
 from .version import GATEWAY_VERSION, RULES_VERSION, UNKNOWN_MODEL_ID
 
 __all__ = [
@@ -226,6 +226,15 @@ class RunSession:
         """End the run on its own terms. The transport still delivers this result."""
         if state not in TERMINAL_STATES or state == "ABORTED":
             raise ValueError(f"not a halt state: {state!r}")
+        if self.aborted:
+            # An aborted run has already lost its trace; relabelling it a
+            # completion would make ``stats()`` report a successful stop for a
+            # run whose record was never written. The reverse order is legal and
+            # required: a halt verdict is followed by the write that can fail.
+            raise ValueError(
+                f"run already aborted ({self.abort_reason}); "
+                f"refusing to relabel it {state}"
+            )
         self.state = state
         self.halt_rule = rule
         self.halt_reason = reason
@@ -391,29 +400,44 @@ class RunSession:
         of call happened without becoming a copy of the data (DESIGN 2.3).
         """
         seq, prev_hash = self.sink.expected_next()
-        args_hash = self.args_hash_for(chosen, args)
-        record = TraceRecord(
-            seq=seq,
-            run_id=self.run_id,
-            parent_run_id=self.parent_run_id,
-            session_id=self.session_id,
-            turn=self.turn,
-            model_id=self.model_id,
-            gateway_version=self.gateway_version,
-            rules_version=self.rules_version,
-            task_id=self.task_id,
-            offered=list(offered),
-            chosen=chosen,
-            args_hash=args_hash,
-            result_digest=digest_result(result),
-            truncated=truncated,
-            evidence_added=list(evidence_added or []),
-            stop_check=stop_check or StopCheck(),
-            decision=decision,
-            state=state or self.state,
-            latency_ms=max(0, int(latency_ms)),
-            prev_hash=prev_hash,
-        ).seal()
+        try:
+            args_hash = self.args_hash_for(chosen, args)
+            record = TraceRecord(
+                seq=seq,
+                run_id=self.run_id,
+                parent_run_id=self.parent_run_id,
+                session_id=self.session_id,
+                turn=self.turn,
+                model_id=self.model_id,
+                gateway_version=self.gateway_version,
+                rules_version=self.rules_version,
+                task_id=self.task_id,
+                offered=list(offered),
+                chosen=chosen,
+                args_hash=args_hash,
+                result_digest=digest_result(result),
+                truncated=truncated,
+                evidence_added=list(evidence_added or []),
+                stop_check=stop_check or StopCheck(),
+                decision=decision,
+                state=state or self.state,
+                latency_ms=max(0, int(latency_ms)),
+                prev_hash=prev_hash,
+            ).seal()
+        except NonCanonicalValue as exc:
+            # A record that cannot be sealed is a record that cannot be written,
+            # so it leaves this method as ``TraceWriteError`` -- the one exception
+            # the transport's fail-closed branch understands. Anything else is a
+            # *stray* exception past that branch: it escapes ``_handle_call``
+            # after the upstream was already called, leaving a call the trace
+            # cannot show and a run that keeps serving. Reachable from the wire
+            # rather than from a programming mistake: ``json.loads`` accepts
+            # ``NaN``/``Infinity``, so an upstream can put a non-finite number in
+            # ``structuredContent`` and ``canonical_bytes`` refuses it (D16's
+            # finding, one layer down).
+            raise TraceWriteError(
+                f"seq {seq}: the record cannot be sealed ({exc})"
+            ) from exc
 
         self.sink.append(record)
         self.records_written += 1

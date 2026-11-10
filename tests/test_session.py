@@ -13,7 +13,7 @@ from gateway.session import (
     result_size_bytes,
 )
 from gateway.trace.record import genesis_hash
-from gateway.trace.sink import JsonlSink
+from gateway.trace.sink import JsonlSink, TraceWriteError
 from gateway.trace.verify import verify_path
 
 
@@ -95,6 +95,45 @@ class RunSessionTests(unittest.TestCase):
         self.session.abort("trace write failed")
         self.assertTrue(self.session.aborted)
         self.assertEqual(self.session.stats()["abort_reason"], "trace write failed")
+
+    def test_an_aborted_run_cannot_be_relabelled_a_halt(self):
+        # ``halt`` used to overwrite the state without looking, so an aborted
+        # run could report ``HALTED_COMPLETE`` while still carrying an
+        # ``abort_reason``: a run that lost its trace counted as a clean stop.
+        # The reverse order stays legal and is required -- a halt verdict is
+        # followed by the write that can fail.
+        self.session.abort("trace write failed at seq 1")
+        with self.assertRaises(ValueError):
+            self.session.halt("HALTED_COMPLETE", rule="R4", reason="complete")
+        self.assertEqual(self.session.state, "ABORTED")
+
+    def test_a_halt_can_still_be_followed_by_an_abort(self):
+        self.session.halt("HALTED_COMPLETE", rule="R4", reason="complete")
+        self.session.abort("the record for that halt could not be written")
+        self.assertEqual(self.session.state, "ABORTED")
+
+    def test_a_record_that_cannot_be_sealed_is_a_write_failure(self):
+        """``NaN`` is legal JSON -- ``json.loads`` accepts it -- and not
+        hashable, so an upstream can hand the gateway a payload it cannot
+        record. That must leave ``record_call`` as the exception the transport's
+        fail-closed branch already handles; as a stray ``NonCanonicalValue`` it
+        escaped after the call had been made, leaving a call the trace cannot
+        show and a run that keeps serving (DESIGN 1.5's one undetectable gap).
+        """
+        with self.assertRaises(TraceWriteError):
+            self.session.record_call(
+                offered=["a"], chosen="a", args={}, result={"rows": [float("nan")]},
+                latency_ms=1,
+            )
+        self.assertEqual(self.session.records_written, 0)
+        self.assertEqual(self.path.read_bytes(), b"", "no half-written record")
+        self.assertEqual(self.session.state, "RUNNING")
+        # The chain is unharmed: the next record is still seq 1.
+        record = self.session.record_call(
+            offered=["a"], chosen="a", args={}, result={"rows": []}, latency_ms=1
+        )
+        self.assertEqual(record.seq, 1)
+        self.assertEqual(verify_path(self.path).records, 1)
 
     def test_turn_increments_only_when_caller_does_it(self):
         self.session.record_call(offered=["a"], chosen="a", args={}, result=1, latency_ms=1)

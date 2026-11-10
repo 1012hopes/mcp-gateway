@@ -258,6 +258,31 @@ def _flatten_variants(
     return schema
 
 
+def _ensure_properties_object(
+    schema: Mapping[str, Any], notes: List[str]
+) -> Mapping[str, Any]:
+    """``properties`` is the only place the model can read argument names.
+
+    Every other shape is a server bug, and the gateway still has to survive it:
+    ``"properties": "abc"`` reached ``dict(schema.get("properties") or {})`` in
+    :func:`_complete_required` and came back as ``ValueError: dictionary update
+    sequence element #0 has length 1``, and ``"properties": []`` as ``TypeError``
+    -- a traceback at startup, for exactly the kind of schema this module exists
+    to absorb. Repair it once, before anything else looks at the key, and say so
+    in the notes; the types are unrecoverable, but the ``required`` names below
+    still get listed by ``_complete_required``, so the tool stays callable.
+    """
+    if "properties" not in schema:
+        return schema
+    properties = schema.get("properties")
+    if isinstance(properties, Mapping):
+        return schema
+    notes.append(f"properties-not-an-object:{type(properties).__name__}")
+    out = dict(schema)
+    out["properties"] = {}
+    return out
+
+
 def _complete_required(
     schema: Mapping[str, Any], notes: List[str]
 ) -> Mapping[str, Any]:
@@ -364,6 +389,7 @@ def normalize_schema(
             # are not arguments.
             schema = {k: v for k, v in schema.items() if k != key}
             notes.append(f"stripped-defs:{key}")
+    schema = _ensure_properties_object(schema, notes)
     schema = _flatten_variants(schema, notes)
     schema = _complete_required(schema, notes)
     schema = _ensure_object(schema, notes)
@@ -583,13 +609,37 @@ class Registry:
 
 
 def load_baseline(path: Path) -> Optional[Dict[str, str]]:
-    """Read the frozen hashes. ``None`` means "no baseline yet" (first run)."""
+    """Read the frozen hashes. ``None`` means "no baseline yet" (first run).
+
+    Two outcomes only: the mapping, or no baseline. A file that exists and
+    cannot be read is *not* "no baseline" -- treating it as one would silently
+    serve every tool unfrozen, which is the refusal this function's caller was
+    written to make. So every unreadable shape becomes ``RegistryError`` with
+    the path in it.
+
+    It used to leak the parser's own exceptions: an empty or half-written file
+    raised ``JSONDecodeError`` (a ``ValueError``), a file whose top level is a
+    list raised ``AttributeError`` -- and ``scripts/freeze_schema.py`` and
+    ``gating_demo.py`` call this without a net, so the operator got a traceback
+    instead of "this manifest is broken". ``utf-8-sig`` because a manifest that
+    was opened and saved by a Windows editor grows a BOM, and a BOM is not a
+    corruption of the contract -- refusing over one would be pedantry that
+    looks like rigour.
+    """
     if not path.exists():
         return None
-    data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        raise RegistryError(f"cannot read schema manifest {path}: {exc}") from exc
+    if not isinstance(data, Mapping):
+        raise RegistryError(
+            f"malformed schema manifest {path}: top level is a "
+            f"{type(data).__name__}, not an object"
+        )
     tools = data.get("tools")
     if not isinstance(tools, dict):
-        raise RegistryError(f"malformed schema manifest: {path}")
+        raise RegistryError(f"malformed schema manifest {path}: no tools object")
     return {str(k): str(v) for k, v in tools.items()}
 
 

@@ -37,6 +37,20 @@ KIND_CLOSED = "closed"
 _SEPARATOR = re.compile(r"\s\|\s")
 
 
+def _one_line(value: Any) -> str:
+    """Flatten a value onto one line. **The notice is a line protocol.**
+
+    ``format_notice`` already promised "one single-line, greppable, parseable
+    notice", and did not enforce it: ``reason="a\\nb"`` produced two lines, and
+    the parser recovered only ``a`` -- the second line landed in the transcript
+    as unlabelled text, free for the model to read as data. Reasons are prose
+    built from rule messages and exception text, so a newline is not exotic.
+    Collapsing whitespace is the honest repair: a notice whose reason spans
+    lines was never recoverable anyway.
+    """
+    return " ".join(str(value).split())
+
+
 def format_notice(kind: str, **fields: Any) -> str:
     """Render one single-line, greppable, parseable notice.
 
@@ -44,12 +58,12 @@ def format_notice(kind: str, **fields: Any) -> str:
     reason containing the separator cannot corrupt the other fields.
     """
     reason = fields.pop("reason", None)
-    parts = [f"{NOTICE_PREFIX} {kind}"]
+    parts = [f"{NOTICE_PREFIX} {_one_line(kind)}"]
     for key, value in fields.items():
-        parts.append(f"{key}={value}")
+        parts.append(f"{_one_line(key)}={_one_line(value)}")
     if reason is not None:
-        parts.append(f"reason={reason}")
-    return " | ".join(str(part) for part in parts)
+        parts.append(f"reason={_one_line(reason)}")
+    return " | ".join(parts)
 
 
 def parse_notice(text: str) -> Optional[Dict[str, str]]:
@@ -58,6 +72,12 @@ def parse_notice(text: str) -> Optional[Dict[str, str]]:
     Scans every line rather than only the first: a notice is appended to a
     result that may already contain several text blocks, and requiring it to be
     line one would make the contract depend on block ordering.
+
+    ``kind`` wins over any field with the same name. The two dictionaries used
+    to be merged the other way round, so a line reading ``[gateway] halt |
+    kind=closed`` parsed as ``closed`` -- a field could rename the notice, and
+    a parser that can be renamed is one that reports the wrong thing about the
+    run.
     """
     for line in (text or "").splitlines():
         stripped = line.strip()
@@ -82,5 +102,5 @@ def parse_notice(text: str) -> Optional[Dict[str, str]]:
                 fields["reason"] = " | ".join([value] + tail[index + 1 :])
                 break
             fields[key] = value
-        return {"kind": kind, **fields}
+        return {**fields, "kind": kind}
     return None

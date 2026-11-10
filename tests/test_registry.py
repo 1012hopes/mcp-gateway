@@ -183,6 +183,31 @@ class SchemaRepairTests(unittest.TestCase):
         self.assertEqual(entry.input_schema["type"], "object")
         self.assertIn("schema-not-an-object", entry.notes)
 
+    def test_properties_that_are_not_an_object_are_repaired_not_crashed(self):
+        # ``dict("abc")`` raises ValueError and ``dict([1, 2])`` raises
+        # TypeError; both reached startup as a traceback, on exactly the kind
+        # of schema this module exists to absorb.
+        for properties, kind in (("abc", "str"), ([1, 2], "list"), (7, "int")):
+            with self.subTest(properties=properties):
+                entry = one(
+                    raw(
+                        "t",
+                        {"type": "object", "properties": properties, "required": ["a"]},
+                    )
+                )
+                self.assertEqual(entry.input_schema["properties"], {"a": {}})
+                self.assertIn(
+                    f"properties-not-an-object:{kind}", entry.notes
+                )
+                # The argument is still listed, so the tool remains callable:
+                # we cannot recover the type, but we can keep it reachable.
+                self.assertEqual(entry.input_schema["required"], ["a"])
+
+    def test_properties_repair_does_not_touch_a_valid_map(self):
+        entry = one(raw("t", {"type": "object", "properties": {"a": {"type": "integer"}}}))
+        self.assertEqual(entry.input_schema["properties"], {"a": {"type": "integer"}})
+        self.assertFalse([n for n in entry.notes if n.startswith("properties-not-an-object")])
+
 
 class HashStabilityTests(unittest.TestCase):
     def test_key_order_does_not_change_the_hash(self):
@@ -388,6 +413,37 @@ class BaselineFileTests(unittest.TestCase):
     def test_missing_file_is_not_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertIsNone(load_baseline(Path(tmp) / "nope.json"))
+
+    def test_unreadable_manifest_raises_the_declared_error(self):
+        """A file that exists and cannot be read is not "no baseline yet".
+
+        Each of these used to leak the parser's own exception -- and
+        ``scripts/freeze_schema.py`` calls this without a net, so the operator
+        saw a traceback instead of "this manifest is broken".
+        """
+        cases = {
+            "empty": "",
+            "half-written": '{"version": 1, "tools": {"a": "b"',
+            "top-level-list": "[1, 2, 3]",
+            "no-tools": '{"version": 1}',
+            "tools-not-an-object": '{"version": 1, "tools": []}',
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, text in cases.items():
+                with self.subTest(case=name):
+                    path = Path(tmp) / f"{name}.json"
+                    path.write_text(text, encoding="utf-8")
+                    with self.assertRaises(RegistryError) as caught:
+                        load_baseline(path)
+                    self.assertIn(str(path), str(caught.exception))
+
+    def test_a_bom_is_not_corruption(self):
+        # A manifest opened and saved by a Windows editor grows a BOM. Refusing
+        # over one is pedantry that looks like rigour: the bytes are readable.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "manifest.json"
+            path.write_text('{"version": 1, "tools": {"u.q": "abc"}}', encoding="utf-8-sig")
+            self.assertEqual(load_baseline(path), {"u.q": "abc"})
 
     def test_manifest_is_sorted_and_stable(self):
         registry = build_registry(

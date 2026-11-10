@@ -150,12 +150,13 @@
 
 **只修 bug，不加功能。** 允许做的事：补测试、补 README、重录 demo、修 `--doctor`。任何"顺手加一个"的念头都写进 `docs/backlog.md`，不当场做。
 
-> **D16 结果（记录）**：**完成**。缓冲期第一天，**只修 bug，没加功能**。做法不是"找几个地方改改"，而是拿恶意输入去撞每个模块：`verify` 被 4000 条类型变异记录喂过（3913 条真正改变了内容，**0 条谎报绿、0 次崩溃**），`verify`/`render` 被空文件、纯空行、BOM、CRLF、20 万字符长行、NUL 字节、非 UTF-8 字节分别喂过。修了五个真 bug，每个配一条回归测试，**536 tests**（裸解释器 396 / 140 skipped / 0 error），八个 demo 全绿（agent 10、g2 8、evidence 12、boundary 12、compat 31、gating 16、replay 37、tamper 8/8）。五个 bug，按"谁伤得更重"排：
+> **D16 结果（记录）**：**完成**。缓冲期第一天，**只修 bug，没加功能**。做法不是"找几个地方改改"，而是拿恶意输入去撞每个模块：`verify` 被 4000 条类型变异记录喂过（3913 条真正改变了内容，**0 条谎报绿、0 次崩溃**），`verify`/`render` 被空文件、纯空行、BOM、CRLF、20 万字符长行、NUL 字节、非 UTF-8 字节分别喂过。修了六个真 bug，每个配一条回归测试，**539 tests**（裸解释器 399 / 140 skipped / 0 error），八个 demo 全绿（agent 10、g2 8、evidence 12、boundary 12、compat 31、gating 16、replay 37、tamper 8/8）。按"谁伤得更重"排：
 > 1. **校验器会被它要判定的文件干掉（非有限浮点）**。Python 的 `json.loads` 默认接受 `NaN`/`Infinity`，于是一行"合法 JSON"进到重算哈希那步，`canonical_bytes` 抛 `NonCanonicalValue`，`verify` 整个 traceback。新增 `non_canonical`：**"不可验证"不是"被改过"**——它没有哈希可比，说成篡改是编证据。模糊测试找到的，不是读代码找到的。
 > 2. **同上，非 UTF-8 字节**。一个字节坏掉（写到一半被杀、被别的工具转过码），`verify_path` 与 `load_replay` 一起 `UnicodeDecodeError`。新增 `decode_trace()` 放在 `verify` 里、`render` 复用，报 `not_utf8` **带行号和字节偏移**，并且**先把坏行之前的记录真校验一遍**报出 `records=n`——审稿人要能看出这份文件还剩多少可信。渲染复用同一个解码器，否则页面与命令行会就"哪一行坏了"给出两个答案。
 > 3. **CLI 对一个目录回答"你的轨迹被篡改了"**。`verify` 只捕 `FileNotFoundError`，传目录是 `PermissionError`（Windows 上目录就是"拒绝访问"），于是先 traceback、再以退出码 1 结束——**关于一个从未打开过的文件，做出了关于内容的判决**。现在 0 = 完整 / 1 = 断链 / 2 = 读不到或命令行不对；`tests/test_cli.py` 是这份契约的第一个测试（此前 CLI 的退出码**一条测试都没有**）。
 > 4. **选择器的索引缓存按名字做键**。同一个工具换了描述、名字没换（这正是 `tools/list` 再问一次的样子，也是 D13 脏 schema 上游干的事），缓存继续用旧文本排——实测两个工具互换描述后排名一动不动。改成**按语料做键**，并给缓存加了上限（漂移的上游每轮产生一个新语料，无界字典就是长期进程里的慢性泄漏）。每轮重建索引 0.33 ms，比一个会撒谎的缓存便宜。
 > 5. **`MAX_RESULT_BYTES` 量的是字符数**。同样 1.2 MB：ASCII 被标 `truncated`，一页中文不算（40 万字符）。失败方向恰好是最坏的那个——漏标的部分结果会让 R4 拿半个行集宣称完成。改成 UTF-8 字节数。
+> 6. **`_meta` 不是对象时被当成"没声明"**（补齐边界层审计时撞出来的，晚于前五个，单独一个 commit）。`_meta_of()` 用 `isinstance(meta, Mapping)` 做过滤，于是 `"_meta": []`、`"_meta": "gateway:t01"` 这类形状**静默回落成"这个调用没有声明"**——正是这个模块拒绝未知键（`inhert`）时给出的理由：**调用者以为声明生效了，而网关耸了耸肩**。现在非对象的 `_meta` 报 `DeclarationError`，`null`/缺省仍是"没声明"（缺席不是错误）；顺带接受 `model_dump()` 形态，免得某个 SDK 版本把 dict 换成模型就默默废掉全部声明。
 >
 > 两条**我自己的测量错误**（记下来，因为项目的主张就是"过程与结论同一套做法"）：探测脚本用 `write_text` 写 CRLF 文件，Windows 上又翻译了一次，造出 `\r\r\n`，差点把"CRLF 读不了"记成一个 bug；`render_html` 收的是一个 `Replay` 而不是 `(steps, verdict)`，第一次探测全红是脚本错了。**先怀疑探针，再怀疑被测对象。**
 >

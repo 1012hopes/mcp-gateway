@@ -18,7 +18,7 @@
 | D13（11-10） | 完成 | 三个脏上游（`dirty_schema` / `weird_capability` / `slow_flaky`）+ `config/gateway-dirty.json`（**不并进 `gateway.json`**，否则实验分母从 10 涨到 23）+ `docs/backlog.md`；`compat_demo.py` **31/31 PASS**：23 个工具名唯一、十种坏结果无一中断、"一次超时只损失一次调用"；468 tests（裸解释器 333 / 135 skipped，0 error） | D14：准入 + 异构工具 |
 | D14（11-10） | 完成 | `gateway/selector.py`（BM25，`enriched` 索引，K=5、M=10、pin 占槽位不放宽）+ `mcp_servers/catalog_server.py` / `wiki_server.py` / `gh_server.py`（30 个工具）+ `agent/loop.py` 每轮重取 `tools/list`；`gating_demo.py` **16/16 PASS**：**Accuracy@5 全量 1.00 → 窗口 1.00（下降 0%）**、20/20 答案不变、`outside-window 0/65`、schema **14578 → 1920 字节/轮（省 87%）**、`pins 43/43`；`test_selector` 22 例 + `test_gating` 5 例；**495 tests**（裸解释器 355 / 140 skipped，0 error） | D15：回放视图 + README |
 | D15（11-10） | 完成 | `gateway/trace/render.py`（单文件 HTML，服务端渲染，JS 只切显示）+ `python -m gateway.trace render` + `scripts/replay_demo.py`（**37/37 PASS**）+ `docs/faq.md`（25 问，第 12 问是 D16 补的：轨迹文件本身坏了会怎样）；**4 步真轨迹渲染 → 改第 3 行 → 再渲染**：只有第一条红、之后标"无法验证"、R4 在 seq=4 拿唯一强调色；顺手修正 `DECISIONS`（漏 3 个真名、错 1 个、多 1 个），加源码扫描测试；**519 tests**（裸解释器 379 / 140 skipped，0 error） | D16：缓冲期（只修 bug） |
-| D16（11-10） | 完成 | 缓冲期第一天，**只修 bug、没加功能**。拿恶意输入撞模块：4000 条类型变异记录（3913 条真正改变内容，**0 谎报绿、0 崩溃**）+ 空/纯空行/BOM/CRLF/20 万字符长行/NUL/非 UTF-8。修五个真 bug：`verify` 被 `NaN` 干掉（新增 `non_canonical`）、被非 UTF-8 字节干掉（新增 `decode_trace`/`not_utf8`，带行号+字节偏移，并报出坏行之前已验证的 `records=n`）、CLI 对目录回 traceback 且退出码 1（现在 0/1/2，`tests/test_cli.py` 是这份契约的第一个测试）、选择器索引缓存按名字做键（改名不改就吃旧排名，改按语料做键 + 上限）、`MAX_RESULT_BYTES` 量的是字符数（1.2 MB 中文不标 `truncated`，改成 UTF-8 字节）；**536 tests**（裸解释器 396 / 140 skipped，0 error），八个 demo 全绿 | D17：缓冲期（只修 bug） |
+| D16（11-10） | 完成 | 缓冲期第一天，**只修 bug、没加功能**。拿恶意输入撞模块：4000 条类型变异记录（3913 条真正改变内容，**0 谎报绿、0 崩溃**）+ 空/纯空行/BOM/CRLF/20 万字符长行/NUL/非 UTF-8。修六个真 bug：`verify` 被 `NaN` 干掉（新增 `non_canonical`）、被非 UTF-8 字节干掉（新增 `decode_trace`/`not_utf8`，带行号+字节偏移，并报出坏行之前已验证的 `records=n`）、CLI 对目录回 traceback 且退出码 1（现在 0/1/2，`tests/test_cli.py` 是这份契约的第一个测试）、选择器索引缓存按名字做键（改名不改就吃旧排名，改按语料做键 + 上限）、`MAX_RESULT_BYTES` 量的是字符数（1.2 MB 中文不标 `truncated`，改成 UTF-8 字节）、`_meta` 非对象被静默当成"没声明"（改成 `DeclarationError`）；**539 tests**（裸解释器 399 / 140 skipped，0 error），八个 demo 全绿 | D17：缓冲期（只修 bug） |
 
 ## D1 完成判据核对
 
@@ -442,6 +442,7 @@ old formula: steps where it would see an unchanged state: none
 | 同一工具换描述、名字不变（`tools/list` 再问一次） | 索引缓存按名字命中 → 用旧文本排名，实测排名一动不动 | 按语料做键，排名跟着新文本走；缓存上限定为 8 个语料 |
 | 1.2 MB 的一页中文结果 | `len(repr(...))` 数的是字符 = 40 万 → **不标 `truncated`** | `result_size_bytes()` 数 UTF-8 字节 → 与同样大小的 ASCII 一致 |
 | 4000 条类型变异记录（3913 条真改过） | 1 类崩溃 | **0 崩溃、0 谎报绿**（改过的记录不可能验通过，这条被断言了 3913 次） |
+| `_meta: []` / `_meta: "gateway:t01"` | 静默回落成"这个调用没有声明"，run 不继承、不报错 | `DeclarationError: _meta must be an object`；`_meta: null` 与缺省仍是"没声明" |
 | 空文件 / 纯空行 / BOM / CRLF / 20 万字符长行 / NUL 字节 | 全部已正确（BOM 报 `json_parse` 并给出 "decode using utf-8-sig"） | 未改动，写进探测脚本防回归 |
 
 ## D16 的五个发现
@@ -456,10 +457,13 @@ old formula: steps where it would see an unchanged state: none
 
 **5. 名字里的单位是承诺。** `MAX_RESULT_BYTES` 量的是 `len(repr(...))`，即字符数。同样 1.2 MB，ASCII 被标 `truncated`、中文不被标。而这个标记的下游是 R4：漏标的部分结果会被当成完整证据，直接产出一个假完成。**方向的错误比大小的错误严重**——阈值差一倍只是慢一点，判反了就是错答案。
 
+**6. "沉默"是最难被发现的失败。** 边界层把 `_meta: []`（不是对象）过滤成 `None`，于是"这个调用没有声明"。没有异常、没有日志、没有测试失败——只有一次本该继承证据的 run 悄悄从空开始。**这个模块自己的文档就在反对这件事**（"未知键必须报错，否则调用者会以为声明生效了"），但它只防住了 `_meta` 里面的拼写，没防住 `_meta` 本身的形状。**一条规则的检查点要覆盖到它自己的入口。**
+
 ## D16 追加的三条偏差
 
 56. **CLI 的退出码从 0/1 扩到 0/1/2，`verify` 对"读不到"不再返回 1**。判据没提退出码，但原来的行为是"关于一个从未打开的文件，做出关于内容的判决"。2 的含义是"读不到或命令行不对"，与 `gateway/__main__.py` 里既有的 0/2/3/4 同一套习惯。**这是一次口径变更，所以 `tests/test_cli.py` 先立起来**——此前 CLI 一条测试都没有，退出码只是文档里的一句话。
 57. **`not_utf8` 额外报出 `records=n`**（坏行之前已验证的记录数）。判据只要求"能定位"，多加这个数字是因为审稿人真正要问的是"这份文件还剩多少可信"。代价是多一次前缀校验（O(n) 且只在文件已坏时发生）。
 58. **选择器缓存加了上限（8 个语料，FIFO 淘汰）**。按语料做键之后，一个持续漂移的上游每轮都会产生新键，字典就成了长期进程里的慢性泄漏。**改一个 bug 时要把它的新失效模式一起想掉**——否则只是把崩溃换成了泄漏。
+59. **第六个 bug 在 tag `v0.15-d16` 之后才撞出来**（补齐边界层审计时），单独一个 commit。前五个修完就打点，然后按"还剩哪层没撞过"继续推进——`boundary.py` 当时只读过、没喂过输入。**记录这件事本身也是判据的一部分**：如果文档写"五个"而实际六个，那就回到了这个项目最反对的那种状态——产物与描述不一致。`539 tests`（裸解释器 399 / 140 skipped）。
 
 

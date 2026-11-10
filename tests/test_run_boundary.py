@@ -145,6 +145,37 @@ class DeclarationParsingTests(unittest.TestCase):
         with self.assertRaises(DeclarationError):
             parse_declaration({"_meta": {"gateway": "t01"}})
 
+    def test_a_non_object_meta_is_rejected_rather_than_read_as_no_declaration(self):
+        # Found in D16 by feeding the parser shapes a client could actually send.
+        # Before: ``_meta`` as a list or string fell through the ``isinstance``
+        # check and came back "no declaration" -- the same silent shrug this
+        # module rejects an unknown key for. A caller who attached a declaration
+        # to a request must never be told, by silence, that it was honoured.
+        for meta in ([], "gateway:t01", 7):
+            with self.subTest(meta=meta):
+                with self.assertRaises(DeclarationError) as caught:
+                    parse_declaration({"_meta": meta})
+                self.assertIn("_meta must be an object", str(caught.exception))
+
+    def test_an_absent_meta_is_still_no_declaration(self):
+        # Absence is not a mistake; a protocol-level ``_meta: null`` is how a
+        # client says nothing, and it must not start failing calls.
+        for params in (None, {}, {"_meta": None}):
+            with self.subTest(params=params):
+                self.assertFalse(parse_declaration(params).declared)
+
+    def test_a_meta_that_arrives_as_a_model_is_still_read(self):
+        # A future SDK may hand back a model instead of a dict. Converting is
+        # not generosity -- it is the same bytes in a different wrapper.
+        class MetaModel:
+            def model_dump(self):
+                return {"gateway": {"task": "t02"}}
+
+        class Params:
+            meta = MetaModel()
+
+        self.assertEqual(parse_declaration(Params()).task, "t02")
+
 
 class ForkTests(unittest.TestCase):
     """``RunSession.next_run``: what a follow-up keeps, what a new topic drops."""

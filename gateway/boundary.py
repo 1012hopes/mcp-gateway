@@ -107,6 +107,16 @@ def parse_declaration(params: Any) -> Declaration:
     meta = _meta_of(params)
     if meta is None:
         return NO_DECLARATION
+    if not isinstance(meta, Mapping):
+        # A ``_meta`` that is not an object cannot be searched for a declaration,
+        # so "it declared nothing" and "it declared something unreadable" look
+        # identical from here -- and the second one must not pass as the first.
+        # Same rule as the unknown-key check below: a caller who attached a
+        # declaration to this call gets an error, not a shrug and a run that
+        # never inherited what it asked for.
+        raise DeclarationError(
+            f"_meta must be an object, got {type(meta).__name__}"
+        )
     raw = meta.get(DECLARATION_KEY)
     if raw is None:
         return NO_DECLARATION
@@ -159,11 +169,23 @@ def parse_declaration(params: Any) -> Declaration:
     return Declaration(task=task, inherit=inherit, require=require)
 
 
-def _meta_of(params: Any) -> Optional[Mapping[str, Any]]:
+def _meta_of(params: Any) -> Any:
+    """The raw ``_meta``, whatever its shape -- validation happens in the caller.
+
+    Returning ``None`` for a malformed ``_meta`` was the bug: it turned "this
+    caller's ``_meta`` is not an object" into "this caller declared nothing".
+    """
     if params is None:
         return None
     if isinstance(params, Mapping):
-        meta = params.get("_meta")
-    else:
-        meta = getattr(params, "meta", None)
-    return meta if isinstance(meta, Mapping) else None
+        return params.get("_meta")
+    meta = getattr(params, "meta", None)
+    if isinstance(meta, Mapping):
+        return meta
+    # A future SDK may hand back a model instead of a dict. Converting is not
+    # generosity -- it is the same bytes under a different wrapper, and refusing
+    # it would break valid declarations over a packaging choice.
+    dump = getattr(meta, "model_dump", None)
+    if callable(dump):
+        return dump()
+    return meta

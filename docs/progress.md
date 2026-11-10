@@ -17,6 +17,7 @@
 | D12（11-09） | 完成 | `tasks/checkers/`（20 条，core / productive / adversarial）+ `scripts/make_fixtures.py`（真实运行生成 40 个样本，**40/40**）+ `gateway/metrics.py` + `scripts/experiment.py` → `results/table.md`：**误停 0/20、20/20 停对、182 → 65 次调用（省 64.3%）**；461 tests | D13：三个脏上游 |
 | D13（11-10） | 完成 | 三个脏上游（`dirty_schema` / `weird_capability` / `slow_flaky`）+ `config/gateway-dirty.json`（**不并进 `gateway.json`**，否则实验分母从 10 涨到 23）+ `docs/backlog.md`；`compat_demo.py` **31/31 PASS**：23 个工具名唯一、十种坏结果无一中断、"一次超时只损失一次调用"；468 tests（裸解释器 333 / 135 skipped，0 error） | D14：准入 + 异构工具 |
 | D14（11-10） | 完成 | `gateway/selector.py`（BM25，`enriched` 索引，K=5、M=10、pin 占槽位不放宽）+ `mcp_servers/catalog_server.py` / `wiki_server.py` / `gh_server.py`（30 个工具）+ `agent/loop.py` 每轮重取 `tools/list`；`gating_demo.py` **16/16 PASS**：**Accuracy@5 全量 1.00 → 窗口 1.00（下降 0%）**、20/20 答案不变、`outside-window 0/65`、schema **14578 → 1920 字节/轮（省 87%）**、`pins 43/43`；`test_selector` 22 例 + `test_gating` 5 例；**495 tests**（裸解释器 355 / 140 skipped，0 error） | D15：回放视图 + README |
+| D15（11-10） | 完成 | `gateway/trace/render.py`（单文件 HTML，服务端渲染，JS 只切显示）+ `python -m gateway.trace render` + `scripts/replay_demo.py`（**37/37 PASS**）+ `docs/faq.md`（24 问）；**4 步真轨迹渲染 → 改第 3 行 → 再渲染**：只有第一条红、之后标"无法验证"、R4 在 seq=4 拿唯一强调色；顺手修正 `DECISIONS`（漏 3 个真名、错 1 个、多 1 个），加源码扫描测试；**519 tests**（裸解释器 379 / 140 skipped，0 error） | D16：缓冲期（只修 bug） |
 
 ## D1 完成判据核对
 
@@ -391,5 +392,41 @@ old formula: steps where it would see an unchanged state: none
 46. **新增 `mcp_servers/catalog_server.py` 做公共管道，并新增 `gh_server.py`**。计划只列 `wiki_server.py`——但易混淆样本需要**对手**：`wiki.search` 与 `gh.search` 同名不同 server，才谈得上"名字分不开、描述分得开"。两个 server 的 `Tool` / `select` / `build_server` / `serve` 抽进 `catalog_server`，各自只留数据与工具表。
 47. **`agent/loop.py` 每轮重新 `list_tools()`，`RunResult.visible` 记下每轮窗口**。原实现一次取全量再循环——准入就不生效了。这一条是准入唯一真正的落点：网关会按窗口过滤 `tools/list`，但**如果客户端只问一次，窗口就是一次性的**。
 48. **`_next_tail` / `_next_verify` 从位置下标改为谓词**。过滤后的列表长度会变，"第几个"不再稳定；改成"这一步做过没有"之后，两条政策共用同一段语义。D12 修过的同类下标 bug 在 D14 又冒了一次——说明**下标是一种会在改动中静默失效的接口**。
+
+## D15 完成判据核对
+
+| 判据（`PLAN.md`） | 结果 |
+|---|---|
+| 单文件 HTML 双击可看 | `python -m gateway.trace render <trace>` 写出**一个**文件，禁掉 `script src` / `link` / `@import` / 任何绝对 URL（自检逐条断言）——断网、无字体、无图片也能看。演示产物 `results/replay/r4.html`（18472 字节）与 `tampered.html`（18327 字节） |
+| 点步看 `offered/chosen` 差集 | 左栏每步一个按钮，右侧卡片是**服务端算好**的三行：展示了 N 个 / 选的是其中之一（或**不在其中**）/ 展示了但没选 M 个；`offered` 列表里被选中的那条有底色与 `← chosen` 标记；窗口外的调用额外印"这次调用被记成 forward_outside：窗口是注意力，不是许可" |
+| 篡改后链条标红 | 把第 3 行的 `latency_ms` 从 `0` 改成 `1234`（其余字节不动）→ 顶部 `链断裂 · 首个坏记录 seq=3 line=3 · hash_mismatch`；**只有第 3 张卡片是红的**，卡片里印"记录值 6078572fe174…，重算得 e1717cd307ca…"；第 4 张标"断链之后，无法验证"（灰色删除线）——不是绿色，也不是红色 |
+| 证据齐那步 R4 高亮 | R4 命中的卡片带 `R4 证据完备 → 收束` 徽标与页面唯一的强调色，且必是最后一步（自检断言 `data-seq == 步数`）；`hit=false` 的 R4 只标 `R4 已评估 · 未命中`，不抢那个颜色 |
+| （自加）渲染是确定的 | 同一份记录渲染两次**字节相同**；页面里没有时间戳、没有随机 id（自检用正则钉住）。理由：`latency_ms` 每次跑都不同，页面里再带一个"生成于"，diff 就再也读不出东西 |
+| （自加）底部证据带与记录一致 | `required` 由**最后一条跑过后置规则的记录**的 `evidence ∪ missing` 反推（不读任务文件），t01 这条印出 `sql.rows.incidents / sql.rows.repos / sql.schema` 三个全亮 + `3/3 · 齐了`；缺一项就有一个暗 chip。**没有后置规则的轨迹不画这条带**——画一个空的等于宣称"什么都没要求" |
+| （自加）轨迹文本不会变成标记 | `<script>alert("x")</script>` 与 `"><img src=x onerror=…>` 两种载荷都只作为文本出现；`escaping.html` 是给人肉看的样例，`tests/test_render.py::SafetyTests` 是给 CI 看的 |
+
+## D15 的六个发现
+
+**1. 一个"声明"要等第一个消费者出现，才变成"承诺"。** `gateway/trace/record.py` 里的 `DECISIONS` 集合写着 `halt_complete`，而那条规则写的是 `halt_evidence_complete`；漏了 `halt_duplicate`、`block_declaration`、`block_unknown_tool`、`block_schema_drift`；还列了一个只作为**状态**存在的 `waiting_approval`（`RUN_STATES` 里有它，`DECISIONS` 里不该有）。它漂了十一天没人发现，**因为没有任何代码读过这个集合**——它只是被 `__init__.py` 转出去，在文档里好看。D15 的视图要照着文件里的字符串画，这才第一次有人消费它。修法不是改那几行，是让下一个人改不动：`DECISION_SOURCES` 记明谁写哪个，`tests/test_record.py` 扫 `gateway/` 源码里的 decision 字面量，漏一个就红，多一个也红。
+
+**2. 断言要落在元素上，不要落在整页字符串上。** 第一版自检写 `assertNotIn("is-r4", html)`，用来证明"没命中的规则不该高亮"——它必然失败，因为样式表里本来就有 `.card.is-r4{…}` 和 `.step.is-r4{…}` 两条规则。**这个断言测的是"页面里有没有这条 CSS"，不是"这条记录有没有被标成 R4"。** 改成对 `_cards(html)` 逐个判类名才是测那件事。同一天里第二次撞到同一类问题：`assertNotIn("R4 命中", html)` 也会被顶部那句"这条轨迹里没有 R4 命中"命中——**断言的范围比它要证明的命题大，就会既误报又漏报。**
+
+**3. 算出来不渲染，等于没算。** 第一版把校验器的 `reason` 存进了 `step.error`，但只在"这一行不是 JSON"的分支里渲染它。于是被篡改的记录虽然标红了，却只显示字段表——**页面在告诉你"这里有问题"的同时，把问题的内容藏起来了**。自检里"页面要显示原因"那一条当场红。这一条和 D9 的"判据不能自证"是同一族：**做了事但没有交付，与没做在界面上长得一样。**
+
+**4. 篡改之后的记录有第三种状态，不能只有红绿。** `verify` 只报**第一个**坏记录，因为它之后的 `prev_hash` 已经断了，后面每条"通过"都只是"它自己算得对"。视图必须接住这个口径：第一条红（有证据说它坏）、之后灰（**没有**证据说它们好或坏）。把它们标绿是撒谎，全标红是把"未知"说成"已知"。**"无法验证"是一个必须画出来的状态**，这在图上就是第三条颜色通道。
+
+**5. `hit=false` 的规则不能借 `hit=true` 的措辞。** 第一版对"R4 评估过但没命中"也印 `R4 命中`。这不是文案问题：视图的每一行都在断言，而那一行断言的内容与文件相反。分开之后，`R4 已评估 · 未命中`（灰）与 `R4 证据完备 → 收束`（强调色）是两种事实——前者解释"为什么继续跑"，后者解释"为什么停"。
+
+**6. 确定性是可以被测试的，而时间戳是最容易被顺手加进去的东西。** 我在页脚写了"由 `python -m gateway.trace render` 生成"，但没写生成时间——写了的版本会在同一天里让两份渲染结果对不上。**同输入同字节**现在是一条断言（渲染两次比字节 + 正则禁掉 `20\d\d-\d\d-\d\dT` 与 UUID 形态），因为"能 diff 的产物"本身就是这套东西的用法。
+
+## D15 追加的七条偏差
+
+49. **页面全部服务端渲染，JS 只切显示**（判据只写"点步看差集"，没写在哪算）。在浏览器里再算一遍差集等于给同一件事写第二个实现，而其中一个不在测试覆盖里。现在 `body.js-on` 只控制"JS 在时才折叠"，关掉脚本所有卡片仍然可见、可读、可 Ctrl-F。
+50. **`render.py` 放进 `gateway/trace/`，并给 `python -m gateway.trace` 加 `render` 子命令**（计划只写"`render.py`"）。放包里的实质好处是它与 `verify` 共用同一个 `verify_lines`：**页面的 PASS/FAIL 与命令行不可能给出两个答案**——如果各写一份，迟早一个是"新口径"一个是"旧口径"。
+51. **修正 `DECISIONS` 并加源码扫描测试**（判据外，D15 的第一个消费者逼出来的）。见发现 1。`DECISION_SOURCES` 是新的权威来源，`DECISIONS` 由它派生，两者不可能不一致。
+52. **`hit=false` 不打强调色、文案改为"已评估 · 未命中"**（发现 5）。这一条会改变页面上"徽标密度"，属于表现层决定，但立的规矩是硬的：**视图里的每一行都必须与文件同义**。
+53. **演示产物不入库，冻结一条样例轨迹代替**。`run_id` 与 `latency_ms`（被哈希）每次都不同，HTML 入库就是每次一片无关 diff；`results/replay/` 进 `.gitignore`，仓库里留 `traces/samples/replay-r4.jsonl`（真实跑出来的 4 步、R4 在最后一步、链完整）。所以 `replay_demo.py` 加了 `--sample-out`，样例是**可重造**的，不是手抄的。
+54. **`docs/backlog.md` 加两条并写明"什么条件下值得做"**：跨 run 的合并视图（判据：合并页面必须与单独打开每个 run 得到逐字段相同的结论，否则合并引入了新的解释）、回放页上的"复制为断言"（拒绝理由：从页面复制的多半是**当前行为**，而这套东西存在的意义正是区分当前行为与期望行为）。
+55. **按 `DESIGN` 2.7 补底部证据带，并删掉自己多加的暗色模式**。2.7 原设计写"底：证据进度 通栏、`required` 逐项点亮"，第一版只在卡片里印累计证据，等于把一条判据实现成了半条。`required` 由最后一条跑过后置规则的记录的 `evidence ∪ missing` 反推，**不读任务文件**——2.7 的硬线是"UI 只读 trace，不产生任何新数据"，从任务文件读 `required` 看似更准，实际让页面有了第二个输入源，而那个源不会随轨迹走。暗色模式是同一类问题：先写了 `prefers-color-scheme`，再删掉——语义色只有一套，暗色下六个语义色都得重定对比度，那是把"证据"调成"主题"，正是 2.7 明令禁止的那件事。**设计文档里写"禁止"的东西，落实时最容易被当成审美偏好绕过；它其实是一条判据。**
 
 

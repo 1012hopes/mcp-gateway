@@ -50,6 +50,7 @@ recursion_limit = 25  # LangGraph
 | D12 | checker（20 条 + 40 个样本自测）+ **G3 指标表**（**误停率 0/20、20/20 停对、省 64.3% 调用**） | ✅ 461 tests |
 | D13 | 三个脏上游（脏 schema / 脏协议 / 慢且抖）+ 兼容性自检（**31/31，一次超时只损失一次调用**） | ✅ 468 tests |
 | D14 | 准入：BM25 选择器（`enriched` 索引，K=5）+ 两个异构目录 `wiki` / `gh`（**30 个工具里每轮只递 5.3 个，schema 省 87%，Accuracy@5 不降**） | ✅ 495 tests |
+| D15 | 单文件回放视图（点步看 offered/chosen 差集、篡改标红、R4 高亮）+ FAQ（**37 项自检，双击可看**） | ✅ 519 tests |
 
 ## 快速开始
 
@@ -95,6 +96,13 @@ uv run python scripts/compat_demo.py
 uv run python scripts/gating_demo.py
 uv run python scripts/gating_demo.py --k 3      # 看窗口再窄一点会从哪里开始漏
 uv run python scripts/gating_demo.py --only t01,t02
+
+# D15：回放视图 —— 跑一条真实轨迹，渲染成单文件 HTML，再把其中一行改掉重渲一次
+#      37 项自检：无外链、每步有卡片、差集正确、篡改后只红第一条、R4 高亮、转义安全
+uv run python scripts/replay_demo.py
+
+# 只想看渲染器：任何 .jsonl 轨迹都能开，产物是单个 HTML，断网也能看
+uv run python -m gateway.trace render traces/samples/replay-r4.jsonl
 
 # G1 演示：正常运行 / 真实拔掉写权限 / 注入写盘失败
 uv run python scripts/failclosed_demo.py
@@ -387,6 +395,21 @@ D4 把它做成了可演示、可断言的行为：
 
 第二条是关键：写失败的那次调用，**模型拿不到结果**，所以不会基于"没被记录的证据"继续推理。
 
+## 回放视图：把一条轨迹点开看
+
+`python -m gateway.trace render <trace.jsonl>` 写出**一个** HTML 文件，没有 CDN、没有字体、没有图片——断网双击也能看。页面上四件东西各自对应一条判据：
+
+| 看什么 | 怎么看出来 |
+|---|---|
+| **offered / chosen 差集** | 左栏点一步，右边列出这一轮展示了哪些工具、选的是不是其中之一、展示了没选的有几个；窗口外的调用直接写 `forward_outside` 并说明"窗口是注意力，不是许可" |
+| **链条断没断** | 顶部一个 PASS/FAIL 徽标（与 `verify` 同一个 `verify_lines`，口径不可能不一致）；篡改后**只有第一条**变红并印出"记录值 …，重算得 …"，之后全部标成"断链之后，无法验证"——灰色删除线，因为"验证不了"和"没问题"不是一回事 |
+| **证据齐的那一步** | R4 命中那条卡片带 `R4 证据完备 → 收束` 徽标和唯一的强调色；`hit` 为假的 R4 只标"已评估 · 未命中"，不抢那个颜色 |
+| **证据怎么长起来的** | 每步印出"本条新增"与"到此累计（n 项）"，R4 为什么在那一步成立是看得见的，不是要信我的话；底部通栏把 `required` 逐项点亮（`3/3 · 齐了`），缺的那项是暗的 |
+
+实现上只有一个决定值得说：**页面全部服务端渲染，JS 只切显示。** 在浏览器里再算一遍差集，等于给同一件事写第二个实现，而其中一个不在测试覆盖里。现在关掉脚本，所有卡片仍然可见（`body.js-on` 控制的就是"JS 在时才折叠"）。
+
+演示：`python scripts/replay_demo.py` 跑一条真实轨迹、渲染、再把其中一行的 `latency_ms` 改掉重渲一次，37 项自检包含"无外链""每步一张卡""差集与记录一致""只红第一条""R4 在最后一步""载荷 `<script>` 被转义成文本"。产物在 `results/replay/`（不入库：`run_id` 与 `latency_ms` 每次不同，入库只会制造无关 diff）。
+
 ## 目录
 
 ```
@@ -415,7 +438,8 @@ gateway/
   trace/record.py    TraceRecord + StopCheck + 哈希链入口
   trace/sink.py      fail-closed 写入（写失败回滚，不留半行）
   trace/verify.py    双层校验：L1 完整性 → L2 结构，报首个异常
-  trace/cli.py       verify 命令（退出码 0/1，可进 CI）
+  trace/render.py    单文件 HTML 回放（服务端渲染，JS 只切显示；同输入同字节）
+  trace/cli.py       verify / render 命令（退出码 0/1，可进 CI）
 agent/               客户端：policy（reactive / declared / futile）/ loop（驱动）/ tasks（任务规格）
 mcp_servers/sqlite_server.py        只读 SQLite 上游（8 张表，数据固定可复现）
 mcp_servers/dirty_schema_server.py  故意不合规的上游（$ref / oneOf / 非法名）
@@ -443,12 +467,15 @@ scripts/make_fixtures.py            D12：真实运行 -> good/bad 样本 + 当�
 scripts/experiment.py               D12/G3：对照实验 -> results/table.md（六项指标）
 scripts/compat_demo.py              D13：四个上游一个网关 + 31 项自检（证据一致性在此钉住）
 scripts/gating_demo.py              D14：准入曲线（三索引 × 六 K）+ 重放一致性 + 16 项自检
+scripts/replay_demo.py              D15：渲染 → 篡改 → 再渲染 + 37 项自检（差集/标红/R4/转义）
 scripts/failclosed_demo.py          G1 的 S1/S2/S3
 scripts/tamper_demo.py              8 个篡改用例
 scripts/freeze_schema.py            冻结 / `--check` 检查 schema 漂移
 docs/optimal-steps.md               最优步数怎么数：规则、逐条路径、四条已知代价
 results/tasks.md                    扫描表（生成物，随 commit 更新）
 docs/backlog.md                     想过但判断为"现在不做"的：每条写清什么条件下值得做
+docs/faq.md                         按"审稿人会问什么"组织的问答，每条都指向能自己跑一遍的东西
+traces/samples/replay-r4.jsonl      一条真实轨迹（4 步、R4 在最后一步），渲染器的演示输入
 docs/demo-g1.md                     G1 台词与录屏脚本
 docs/demo-g2.md                     G2 台词与录屏脚本
 ```
@@ -496,6 +523,9 @@ docs/demo-g2.md                     G2 台词与录屏脚本
 - **pin 会让窗口比 K 宽**：`|S_t| ∈ [K, K+M]`，M=10。这一轮缺几种事实，就把几种生产者钉进来，所以"省 87% context"是语料上的平均，不是每条任务的保证；一条要求 8 种事实的任务，窗口可以宽到接近全量
 - **BM25 是词袋，不看结构**：`enriched` 索引把"这个工具能产什么事实"写进被索引的文档，所以它能排对；但两个描述几乎相同、产出也相同的工具，它只能退回字母序。词形归一只有复数折叠（五条规则，可复算），不做 Porter——跨语言、缩写、拼写错误都不处理
 - **冷启动那一轮递的是全量**：第一次 `tools/list` 没有历史可排。省 context 是热轮的数；一条只有一两次调用的 run 基本没省到，`gating_demo` 的曲线表也把 turn 1 排除在外并写明
+- **回放视图只显示记录里已有的东西，不重算判定**：它把 `stop_check` 的 `attempted` / `evidence` / `missing` / `state_hash` 原样印出来，但它不重新跑一遍规则。所以"这个判定当时对不对"要靠 `verify` + 那几行字段自己看——视图能做的是让这件事变得可看，不是替人下结论
+- **一条轨迹一个页面，没有跨 run 对比**：D10 之后同一话题会有多个 run 文件（`parent_run_id` 把它们串起来），现在只能开三个标签页对照。合并视图在 `docs/backlog.md` 里，等真有第三种使用场景再说
+- **回放视图是给人看的，不是给机器读的**：要机器读就走 `verify --json` 和轨迹文件本身。HTML 里刻意不塞 JSON 副本——两份数据两份真，迟早对不上
 - 参数在 20 条任务上标定，样本量不做显著性检验，只报配对差值
 
 ## License

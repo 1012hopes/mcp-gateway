@@ -15,6 +15,8 @@
 | D10（11-09） | 完成 | `gateway/boundary.py`（`_meta.gateway` 声明）+ `gateway/policy.py`（先脱敏再哈希）+ `session.next_run` + `handle_call_tool` 串行锁 + schema v2→v3（`task_id`）；`boundary_demo.py` **12 项自检全 PASS**：不声明 → 第二个话题被 R1 误停，声明 → 三 run 三文件、追问 `evidence_added=[]` 零重读、换题重新读；384 tests | D11：20 条任务集 + 人工最优步数 |
 | D11（11-09） | 完成 | 8 张表的演示库 + 9 个 `ev_type` + `agent/policy.py` 的 `DeclaredPolicy`（计划从数据来、再验尾部是同一段程序）+ 20 条任务（14 生产 + 6 对抗）+ `task_sweep.py`；**182 → 65 次调用（36%），20/20 满足 `baseline ≥ optimal × 3`**；430 tests | D12：checker 自测 + 指标表 |
 | D12（11-09） | 完成 | `tasks/checkers/`（20 条，core / productive / adversarial）+ `scripts/make_fixtures.py`（真实运行生成 40 个样本，**40/40**）+ `gateway/metrics.py` + `scripts/experiment.py` → `results/table.md`：**误停 0/20、20/20 停对、182 → 65 次调用（省 64.3%）**；461 tests | D13：三个脏上游 |
+| D13（11-10） | 完成 | 三个脏上游（`dirty_schema` / `weird_capability` / `slow_flaky`）+ `config/gateway-dirty.json`（**不并进 `gateway.json`**，否则实验分母从 10 涨到 23）+ `docs/backlog.md`；`compat_demo.py` **31/31 PASS**：23 个工具名唯一、十种坏结果无一中断、"一次超时只损失一次调用"；468 tests（裸解释器 333 / 135 skipped，0 error） | D14：准入 + 异构工具 |
+| D14（11-10） | 完成 | `gateway/selector.py`（BM25，`enriched` 索引，K=5、M=10、pin 占槽位不放宽）+ `mcp_servers/catalog_server.py` / `wiki_server.py` / `gh_server.py`（30 个工具）+ `agent/loop.py` 每轮重取 `tools/list`；`gating_demo.py` **16/16 PASS**：**Accuracy@5 全量 1.00 → 窗口 1.00（下降 0%）**、20/20 答案不变、`outside-window 0/65`、schema **14578 → 1920 字节/轮（省 87%）**、`pins 43/43`；`test_selector` 22 例 + `test_gating` 5 例；**495 tests**（裸解释器 355 / 140 skipped，0 error） | D15：回放视图 + README |
 
 ## D1 完成判据核对
 
@@ -352,4 +354,42 @@ old formula: steps where it would see an unchanged state: none
 39. **`config/gateway-dirty.json` 是独立的配置文件，没有并进 `gateway.json`。** 并进去会让 `offered` 从 10 个涨到 23 个，D12 的 Accuracy@K 分母与 `results/table.md` 全部要重算——**兼容性测试不该改动实验的分母**。该配置也不挂 `schema-manifest`（文件故意不存在）：兼容面不是冻结契约，冻结它只会让"改了脏上游"表现为一屏 drift 告警。
 40. **`weird_capability_server` 多了一个计划外的工具 `mirror_labels`**。计划里"返回 `null` 而非空对象"只测了否定路径；要证明"多块正文仍可读"，需要一个**有答案**的负载，否则整组正向断言是空的。它复制了 `labels` 的六行而不读数据库，这样这个 server 不依赖 `var/` 下的种子库。
 41. **新增 `docs/backlog.md`**（PLAN 第 2 节点名要求的地方，此前一直不存在）。D13 攒下三条"想过但不该现在做"的：真裁剪 >1 MB、按形状选正文块、幂等性声明 + 可重试超时。每条都写了"什么条件下值得做"，因为只写"待办"等于把决定推给不在场的未来的自己。
+
+
+## D14 完成判据核对
+
+| 判据（`PLAN.md`） | 结果 |
+|---|---|
+| Accuracy@5 相对全量下降 ≤ 10% | `scripts/gating_demo.py`：全量（K=30）**1.00**，K=5 **1.00**（热轮也 1.00），**下降 0%**。整条曲线印在同一张表里：K=3 → 0.923（热轮 0.889）、K=2 → 0.800、K=1 → 0.785。三个索引进同一张表，不是为了好看——`name` 要到 K=10 才 1.00（窗口均值 10.0 个、3650 字节/轮），`description` 在 K=5 只有 0.892、K=10 也才 0.908（就算加宽也回不到 1.00，因为有些工具的描述里根本没有那个词），`enriched` 在 K=5 就 1.00（窗口 5.3 个、**1920 字节，比全量的 14578 少 87%**） |
+| `wiki.search` 与 `gh.search` 构成易混淆样本 | 两条断言，缺一条就都能被蒙对：**`name` 索引分不开**——"找一个函数在哪"那条落到 `wiki.recent_changes`（同为 `search` 后缀、只差 server 名）；**`description` 索引分得开**——两条各自落到 `wiki.search` / `gh.search`。所以这对样本测的是索引，不是排序器的运气 |
+| 20 条任务在窗口下仍然做得完 | `answers: 20/20 ok \| outside-window calls: 0/65`：没有任何一次调用需要窗口之外的工具，也没有一条任务的答案改变（比对的是 checker 判定，不是摘要） |
+| 窗口是真的，不是事后补记 | 离线重排**逐字复现**线上每一轮窗口：`replay == live: 65/65`。这一项是为了防"demo 自己算出漂亮窗口，网关实际发的是全量"——同一段 `gating_query()` 两边共用 |
+| 缺事实时生产者还在窗口里 | `pins: 43/43` 个缺事实的热轮都保住了生产者（否则 R6 会把可完成的 run 判成 `DEGRADED`） |
+
+## D14 的七个发现
+
+**1. 窗口一窄，先坏的不是准确率，是完成率。** R6 判"任务永远做不完"用的是 `offered`：这一轮的工具面里没有某个事实的生产者，就归档 `DEGRADED`。窗口收窄到 5 个之后，排第 6 位的生产者被判成**不存在**——于是准确率指标一动不动，完成率悄悄掉了。修法不是把窗口放宽（那等于取消准入），而是把这一轮**缺什么事实就把它的生产者钉进窗口**，占槽位不加宽度：`|S_t| ∈ [K, K+M]`。**这是本文档里第三次出现同一类错误：一个下游消费者假设了另一个模块的输出是完整的。**（D9 的 R4 假设 `required` 粒度够细，D13 的截断假设 tool 名不会被 producers 规则解释掉。）
+
+**2. 冷启动如果参与"稳定性合并"，整条曲线会变平。** 第一版把上一轮窗口无条件拿去和这一轮求交，冷启动那轮窗口是全量 30 个，于是第二轮变成 top-M（2K 宽）并**一直那么宽**——实测 K=1 时 Accuracy@K 也是 1.00，看着漂亮，实际每一轮都在发 10 个工具。`sticky_seed()` 对 `reason == COLD_START` 返回空之后曲线才有形状。**一个恒等于 1 的指标，在加选择器那天和加选择器之前长得一模一样。**
+
+**3. 选择器的上限由 q 决定，不由 BM25 决定。** 只用 `--goal` 时，`describe_table` 在 30 个工具里排**第 11 位**，第 2 步就出窗——而它几乎是每条生产型任务的第 2 步。把最近 2 次调用的名字/参数和**结果前 400 字**放进 q 之后才进 top-5。BM25 的 `k1=1.5, b=0.75` 从头到尾没调过：**排序质量在这类任务上主要是"文档里写了什么"和"查询里放了什么"的问题，不是权重的问题。** 调参能掩盖第 3 项这种结构性错误。
+
+**4. 停用词表必须收疑问词。** goal 写成 "which repositories have unresolved incidents and **how many** stars" 时，`wiki.tags`（描述里有 "how many pages carry it"）排第一——因为它和问题的**问法**共享词，而和问题的**内容**无关。加 `how/many/which/whose/there/does` 之后才对。这条和 D9 的"判据不能自证"是同一族：**匹配到了正确的词，不等于匹配到了正确的事。**
+
+**5. 复数折叠那一行代码，决定了一个工具在不在窗口里。** `tables → table` 让 `describe_table` 从第 11 位进 top-5；`repositories → repository` 要 `ies → y` 特例（第一版折成 `repositorie`，索引和查询一起错，所以看不出错）。**只做复数，不做 Porter**：五条规则能被复算，一个算法不能——这和本项目"每个数字都要能被第二个人重跑出来"是同一条约束。
+
+**6. `enriched` 索引省的不是准确率，是一半 context。** 跨层复用：网关已经从证据模型知道 `sqlite.query` 能产 `sql.rows.incidents`，而它的描述只写"跑一条只读 SELECT"。把"这个工具能产什么事实"加进被索引的文档后，`enriched` 在 K=5 达到 1.00，`name` 要到 K=10 才 1.00。**同样的准确率，一半的字节（1920 vs 3650）。** 换句话说，D9 建的证据模型在这里第二次付了利息——第一次是 R4 能判完成，这一次是准入能排对。
+
+**7. "省调用"的分母不能跟着模型的可见性走。** 加过滤时顺手把政策里的尾巴（再验步骤）也按窗口过滤了，基线从 182 掉到 175——**省调用率从 64.3% 变成 62.9%，方向还反了**（分母小了，比例反而低）。原因不是数字难看，是口径错了：**计划属于模型**（看不见的步骤它不会选，所以跳过），**尾巴属于测量**（它是"省了几次"的分母，模型看不看得见它都在那儿）。`_tail()` 因此改回不过滤，并把理由写进注释；`_next_tail` / `_next_verify` 用谓词（这一步做过没有）而不是位置计数，因为过滤后列表长度会变——**D12 修过的下标 bug，在这个方向上是同一处。**
+
+## D14 追加的七条偏差
+
+42. **窗口外的调用放行，不拒**（新增 decision `forward_outside`）。判据只写"Accuracy@5 相对全量下降 ≤10%"，没写窗口外该怎样。放行的理由是**网关看见的是调用，不是意图**：拒掉会把一次排序失误变成任务失败，而轨迹从此分不清"计划错了"和"窗口藏了工具"。代价写在 `DESIGN.md` A1：`forward_outside` 不为零时，省下的只是 context，不是错。
+43. **窗口宽度是区间不是定值：`|S_t| ∈ [K, K+M]`**（发现 1）。计划写"K=5"。pin 占槽位不加宽度——否则"钉住生产者"和"放宽窗口"没有区别，后者等于取消准入。
+44. **`gating` 默认关，`config/gateway.json` 里显式开**。旧 trace 的 `offered` 记的是全量目录；默认改变它等于让历史轨迹撒谎。启动日志印 `gating: on (k=5, m=10, index=enriched)`，`docs/` 里每条命令都带着它。
+45. **索引做成三个变体（`name` / `description` / `enriched`），默认 `enriched`**。计划只写"BM25"。没有变体，"enriched 有用"就只是个说法；有了变体，它是同一张表里的三行（发现 6）。
+46. **新增 `mcp_servers/catalog_server.py` 做公共管道，并新增 `gh_server.py`**。计划只列 `wiki_server.py`——但易混淆样本需要**对手**：`wiki.search` 与 `gh.search` 同名不同 server，才谈得上"名字分不开、描述分得开"。两个 server 的 `Tool` / `select` / `build_server` / `serve` 抽进 `catalog_server`，各自只留数据与工具表。
+47. **`agent/loop.py` 每轮重新 `list_tools()`，`RunResult.visible` 记下每轮窗口**。原实现一次取全量再循环——准入就不生效了。这一条是准入唯一真正的落点：网关会按窗口过滤 `tools/list`，但**如果客户端只问一次，窗口就是一次性的**。
+48. **`_next_tail` / `_next_verify` 从位置下标改为谓词**。过滤后的列表长度会变，"第几个"不再稳定；改成"这一步做过没有"之后，两条政策共用同一段语义。D12 修过的同类下标 bug 在 D14 又冒了一次——说明**下标是一种会在改动中静默失效的接口**。
+
 

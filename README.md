@@ -49,12 +49,13 @@ recursion_limit = 25  # LangGraph
 | D11 | 20 条任务（14 生产 + 6 对抗）+ 人工最优步数 + 扫描表（**182 次调用 → 65 次，20/20 达标**） | ✅ 430 tests |
 | D12 | checker（20 条 + 40 个样本自测）+ **G3 指标表**（**误停率 0/20、20/20 停对、省 64.3% 调用**） | ✅ 461 tests |
 | D13 | 三个脏上游（脏 schema / 脏协议 / 慢且抖）+ 兼容性自检（**31/31，一次超时只损失一次调用**） | ✅ 468 tests |
+| D14 | 准入：BM25 选择器（`enriched` 索引，K=5）+ 两个异构目录 `wiki` / `gh`（**30 个工具里每轮只递 5.3 个，schema 省 87%，Accuracy@5 不降**） | ✅ 495 tests |
 
 ## 快速开始
 
 ```bash
-# 全量测试必须在虚拟环境里跑：需要 SDK 的用例会在裸解释器上 skip，
-# 但 `tests/test_agent_e2e.py` 的收集阶段就会因缺少 SDK 而失败。
+# 全量测试必须在虚拟环境里跑：需要 SDK 的用例会在裸解释器上 skip
+# （355 跑 / 140 skip / 0 error），但虚拟环境里它们是真跑。
 uv run python -m unittest discover -s tests -t .
 
 # 端到端：agent -> 网关 -> sqlite 上游 -> 轨迹落盘 -> verify
@@ -88,6 +89,12 @@ uv run python scripts/experiment.py
 #      脏 schema / 脏协议（多块正文、null、非标错误码、list_changed 连发）
 #      / 慢且抖（超时、空结果、1.2 MB）——不崩，且证据抽取与干净上游一致
 uv run python scripts/compat_demo.py
+
+# D14：准入 —— 30 个工具，每轮只递 5 个（K=5），离线重排必须逐字复现线上窗口
+#      印出三个索引 × 六个 K 的完整曲线、pin 命中数、稳定性、易混淆对（wiki.search vs gh.search）
+uv run python scripts/gating_demo.py
+uv run python scripts/gating_demo.py --k 3      # 看窗口再窄一点会从哪里开始漏
+uv run python scripts/gating_demo.py --only t01,t02
 
 # G1 演示：正常运行 / 真实拔掉写权限 / 注入写盘失败
 uv run python scripts/failclosed_demo.py
@@ -394,6 +401,7 @@ gateway/
   stop/controller.py 停止控制器：排序、短路、attempted 日志（**不含任何判据**）
   stop/normalize.py  参数归一化：调用身份的唯一定义处（A2.1）
   evidence.py        证据模型：来源 + 参数谓词 + 结果形状 -> ev_type（纯函数）
+  selector.py        D14 准入：BM25 排序 + 稳定性合并 + pin（纯函数，可离线重放）
   rules/duplicate.py R1 重复调用（pre，回填上次结果）
   rules/evidence_complete.py R4 证据完备（post，唯一能说"做完了"的判据）
   rules/unreachable.py R6 证据不可得（pre，DEGRADED，零上游调用）
@@ -413,6 +421,9 @@ mcp_servers/sqlite_server.py        只读 SQLite 上游（8 张表，数据固�
 mcp_servers/dirty_schema_server.py  故意不合规的上游（$ref / oneOf / 非法名）
 mcp_servers/weird_capability_server.py 脏协议：多块正文 / null / 非标错误码 / list_changed 连发
 mcp_servers/slow_flaky_server.py    慢且抖：每 N 次超时、每 M 次空结果、单次 1.2 MB
+mcp_servers/catalog_server.py       合成目录的公共管道（Tool / select / build_server / serve）
+mcp_servers/wiki_server.py          D14 异构目录：10 个工具，页面正文可检索（与 gh 同名 `search`）
+mcp_servers/gh_server.py            D14 异构目录：10 个工具，repo / issue / PR / commit（与 sqlite 同名 5 个 repo）
 tasks/t01_unresolved_incidents.json 正常任务：唯一一条结果依赖的（reactive）
 tasks/t03..t15_*.json               13 条生产型：声明式计划 + required evidence
 tasks/t02,t16..t20_*.json           6 条对抗型：查不到的东西，问多少次都是空
@@ -431,6 +442,7 @@ scripts/task_sweep.py               D11：20 条任务 × (baseline, governed) -
 scripts/make_fixtures.py            D12：真实运行 -> good/bad 样本 + 当场互判（40/40）
 scripts/experiment.py               D12/G3：对照实验 -> results/table.md（六项指标）
 scripts/compat_demo.py              D13：四个上游一个网关 + 31 项自检（证据一致性在此钉住）
+scripts/gating_demo.py              D14：准入曲线（三索引 × 六 K）+ 重放一致性 + 16 项自检
 scripts/failclosed_demo.py          G1 的 S1/S2/S3
 scripts/tamper_demo.py              8 个篡改用例
 scripts/freeze_schema.py            冻结 / `--check` 检查 schema 漂移
@@ -480,6 +492,10 @@ docs/demo-g2.md                     G2 台词与录屏脚本
 - **"第一个可解析的文本块"就是正文**：真 server 的横幅是散文，所以成立；把 `{"ok": true}` 放在正文前面的上游会让抽取器报告"没有证据"——一次有答案的调用被记成没答。这条被钉在 `tests/test_compat.py` 里，不是留给别人发现
 - **超过 1 MB 的结果只被标记，没有被裁剪**：`truncated: true` 让证据判定拒绝它，但完整 payload 仍交给模型，上游依然能用单次结果撑爆上下文。真裁剪必须在算摘要之前切，否则 `result_digest` 与模型看到的字节不再对应（`docs/backlog.md` 第 1 条）
 - **误停率的分母是 20 条任务**：一条误停就是 5%。表里报 0/20，不报"误停率 0.0% 所以没问题"——样本量只有这么大，能说的就这么多
+- **窗口外的调用照常转发**：准入是注意力，不是许可。所以"20/20 答案不变"不能单独当成绩——一个完全看错的选择器也能保住答案，只是把窗口外调用变成常态。判据因此落在两处：`Accuracy@K` 与 `outside-window calls` 计数（当前 0/65），而不是"任务还做得完"
+- **pin 会让窗口比 K 宽**：`|S_t| ∈ [K, K+M]`，M=10。这一轮缺几种事实，就把几种生产者钉进来，所以"省 87% context"是语料上的平均，不是每条任务的保证；一条要求 8 种事实的任务，窗口可以宽到接近全量
+- **BM25 是词袋，不看结构**：`enriched` 索引把"这个工具能产什么事实"写进被索引的文档，所以它能排对；但两个描述几乎相同、产出也相同的工具，它只能退回字母序。词形归一只有复数折叠（五条规则，可复算），不做 Porter——跨语言、缩写、拼写错误都不处理
+- **冷启动那一轮递的是全量**：第一次 `tools/list` 没有历史可排。省 context 是热轮的数；一条只有一两次调用的 run 基本没省到，`gating_demo` 的曲线表也把 turn 1 排除在外并写明
 - 参数在 20 条任务上标定，样本量不做显著性检验，只报配对差值
 
 ## License

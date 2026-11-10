@@ -51,6 +51,7 @@ recursion_limit = 25  # LangGraph
 | D13 | 三个脏上游（脏 schema / 脏协议 / 慢且抖）+ 兼容性自检（**31/31，一次超时只损失一次调用**） | ✅ 468 tests |
 | D14 | 准入：BM25 选择器（`enriched` 索引，K=5）+ 两个异构目录 `wiki` / `gh`（**30 个工具里每轮只递 5.3 个，schema 省 87%，Accuracy@5 不降**） | ✅ 495 tests |
 | D15 | 单文件回放视图（点步看 offered/chosen 差集、篡改标红、R4 高亮）+ FAQ（**37 项自检，双击可看**） | ✅ 519 tests |
+| D16 | 缓冲期：拿坏文件撞校验器（**4000 条变异记录 0 崩溃 0 谎报**），修五个真 bug：NaN/非 UTF-8 不再让 `verify` 抛异常、退出码分清"断链"与"读不到"、选择器缓存按语料做键、`truncated` 改按字节判定 | ✅ 536 tests |
 
 ## 快速开始
 
@@ -125,6 +126,8 @@ python -m gateway.trace verify traces/samples/demo-12-steps.jsonl
 #   OK: 12 条记录，链完整
 #   note: 链完整只证明「已记录的部分没被改过」：删掉尾部 N 行，剩余链依然自洽；…
 ```
+
+退出码是三档，不是两档：**0 完整 / 1 断链 / 2 读不到**（文件不存在、传了个目录、没权限）。分开的理由很实际——CI 若把非零一律当"被篡改"，会把"我打不开这个文件"报成"你的轨迹被人改过"。坏文件也不会让它崩：读到非 UTF-8 的字节报 `not_utf8`（带行号与字节偏移，并告诉你坏行之前还有几条是验过的），读到 `NaN` 报 `non_canonical`——**"不可验证"不会被说成"被改过"**。
 
 **为什么轨迹层零依赖**：它是整个项目的证据底座，不该因为某个包升级而写不出记录。`upstream.py` / `transport.py` 才依赖官方 MCP SDK（`mcp>=2.3`）。
 
@@ -437,9 +440,9 @@ gateway/
   trace/canonical.py 确定性序列化（键序、浮点、UTF-8、拒绝 NaN）
   trace/record.py    TraceRecord + StopCheck + 哈希链入口
   trace/sink.py      fail-closed 写入（写失败回滚，不留半行）
-  trace/verify.py    双层校验：L1 完整性 → L2 结构，报首个异常
+  trace/verify.py    双层校验：L1 完整性 → L2 结构，报首个异常；坏字节报 not_utf8 而非抛异常
   trace/render.py    单文件 HTML 回放（服务端渲染，JS 只切显示；同输入同字节）
-  trace/cli.py       verify / render 命令（退出码 0/1，可进 CI）
+  trace/cli.py       verify / render 命令（退出码 0 完整 / 1 断链 / 2 读不到）
 agent/               客户端：policy（reactive / declared / futile）/ loop（驱动）/ tasks（任务规格）
 mcp_servers/sqlite_server.py        只读 SQLite 上游（8 张表，数据固定可复现）
 mcp_servers/dirty_schema_server.py  故意不合规的上游（$ref / oneOf / 非法名）
@@ -502,6 +505,8 @@ docs/demo-g2.md                     G2 台词与录屏脚本
 - **R6 看的是网关的准入决定，不是 agent 的意图**：生产者不在 `offered` 里就判 `DEGRADED`，这是确定的；但"agent 从来不去试那个工具"在网关眼里与健康 run 无异，只能等到轮数上限，此时靠轨迹里的 `missing` 看出来
 - 哈希链保证记录完整，**不保证上游结果真实**（需上游签名）
 - **链只能检出局部改动**：有写权限者可把改后记录的后续 `prev_hash`/`hash` 全部重算，链依然自洽；删掉尾部 N 行同样检不出。要封住这两个口子需外部锚定（链头签名、只追加日志、把末条 `hash` 打进 git tag）。`verify` 成功时会打印这条限制，不让"链完整"被读成"无遗漏"
+- **缓冲期那轮模糊测试只变异单字段**（D16）：4000 条记录里每条只改一个字段，多字段组合、跨行破坏、把两条记录拼成一行都没覆盖。"0 崩溃"这个结论的适用范围就是这句话，不多一个字
+- **`truncated` 是标记，不是裁剪**：超过 1 MB 的结果仍然整份交给模型，只是不被算作证据（`docs/backlog.md` 里写了什么条件下才值得真裁）
 - **中途写失败的那次调用已经执行过了**：结果不会交给模型，但上游副作用无法回滚。所以只读工具可以放心重试，写操作需要上游侧幂等（`DESIGN` FR-17）
 - 工具返回内容会进模型上下文，存在提示注入面，只能约束"结果不解析为控制流"
 - **schema 漂移时工具直接消失**：从 `offered` 移除、调用返回 `block_schema_drift`，而不是降级继续。这是刻意的（历史轨迹可比性优先），但现场看起来像"网关坏了"，所以 `registry: schema-drift:...` 会打到 stderr

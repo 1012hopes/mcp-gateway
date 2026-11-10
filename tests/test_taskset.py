@@ -31,7 +31,7 @@ from agent.policy import (  # noqa: E402
     DeclaredPolicy,
     Observation,
 )
-from agent.tasks import load_tasks  # noqa: E402
+from agent.tasks import TaskSpec, load_tasks  # noqa: E402
 from gateway.evidence import load_evidence_model  # noqa: E402
 
 EVIDENCE_PATH = ROOT / "config" / "evidence.json"
@@ -139,16 +139,63 @@ class DeclaredPlanTests(unittest.TestCase):
                 self.assertEqual(task.optimal_steps, len(task.required_evidence))
 
     def test_plans_are_non_empty_and_distinct(self):
-        # Distinctness is load-bearing twice: ``_tail_done`` anchors on the first
+        # Distinctness is load-bearing twice: ``_next_tail`` anchors on the first
         # occurrence of the plan's last action, and the tail opens with an exact
         # repeat of it. A plan that repeated a step would make the anchor land on
         # the wrong call and the run would never advance past its first re-check.
+        #
+        # Non-emptiness only applies to declared tasks: a reactive task has no
+        # plan by design (its plan depends on what the last call returned). The
+        # first version of this test skipped every empty plan -- including
+        # declared ones -- so it checked *part* of what its name promised.
         for task in TASKS:
+            if task.policy in ("declared", "plan"):
+                with self.subTest(task=task.id):
+                    self.assertTrue(task.plan, "a declared task must plan something")
             if not task.plan:
                 continue
             keys = [(step.tool, json.dumps(dict(step.args), sort_keys=True)) for step in task.plan]
             with self.subTest(task=task.id):
                 self.assertEqual(len(keys), len(set(keys)), "plan repeats a step")
+
+
+class DeclaredTaskWithoutAPlanTests(unittest.TestCase):
+    """A baseline run that makes zero calls must not look like an efficient one.
+
+    ``DeclaredPolicy`` returns ``None`` on turn 1 when the plan is empty, so the
+    run ends with zero calls and zero records -- and in ``results/table.md`` it
+    contributes 0 to the *denominator* of "calls saved". A typo in one task file
+    would therefore improve the headline number while removing a task from the
+    experiment (measured in the D17 audit: 0 records, no error, ``steps=0``).
+    """
+
+    def test_a_declared_task_with_no_plan_is_refused_at_load(self):
+        with self.assertRaises(ValueError) as caught:
+            TaskSpec.from_dict({"id": "t-empty", "goal": "g", "policy": "declared"})
+        self.assertIn("empty plan", str(caught.exception))
+
+    def test_an_empty_plan_list_is_refused_too(self):
+        # ``[]`` and a missing key are the same mistake written two ways.
+        with self.assertRaises(ValueError):
+            TaskSpec.from_dict(
+                {"id": "t-empty", "goal": "g", "policy": "declared", "plan": []}
+            )
+
+    def test_the_reactive_policy_may_still_have_no_plan(self):
+        task = TaskSpec.from_dict({"id": "t", "goal": "g"})
+        self.assertEqual(task.plan, ())
+        self.assertEqual(task.policy, "reactive_sqlite")
+
+    def test_a_declared_task_with_a_plan_still_loads(self):
+        task = TaskSpec.from_dict(
+            {
+                "id": "t",
+                "goal": "g",
+                "policy": "declared",
+                "plan": [{"tool": "sqlite.query", "args": {"sql": "select 1"}}],
+            }
+        )
+        self.assertEqual(len(task.plan), 1)
 
 
 class AdversarialTests(unittest.TestCase):

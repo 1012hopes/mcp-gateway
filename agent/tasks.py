@@ -86,13 +86,26 @@ class TaskSpec:
         futile = data.get("futile_sql") or ()
         if isinstance(futile, str):
             raise ValueError("futile_sql must be a list of statements, not a string")
+        policy = str(data.get("policy", "reactive_sqlite"))
+        if policy in ("declared", "plan") and not plan:
+            # A declared task with no plan is not a fast run, it is a run that
+            # asks for nothing: ``DeclaredPolicy`` returns ``None`` on turn 1,
+            # the run ends with zero calls and zero records, and in the baseline
+            # column that contributes 0 to the denominator of "calls saved". So
+            # a typo in one task file would quietly improve the headline number.
+            # Measured in the D17 audit: 0 records, no error, ``steps=0``.
+            raise ValueError(
+                f"task {data.get('id')!r} declares policy={policy!r} with an empty "
+                f"plan; a declared task that plans nothing is a task that cannot "
+                f"be told apart from one that finished"
+            )
         return cls(
             id=str(data["id"]),
             goal=str(data.get("goal", "")),
             required_evidence=tuple(str(item) for item in required),
             max_turns=int(data.get("max_turns", 12)),
             max_calls=(int(data["max_calls"]) if data.get("max_calls") is not None else None),
-            policy=str(data.get("policy", "reactive_sqlite")),
+            policy=policy,
             optimal_steps=data.get("optimal_steps"),
             optimal_path=str(data.get("optimal_path", "")),
             plan=plan,

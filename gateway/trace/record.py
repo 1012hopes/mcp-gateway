@@ -114,6 +114,8 @@ DECISION_SOURCES = {
     "halt_budget": "rules/budget.py (R3)",
     "halt_evidence_complete": "rules/evidence_complete.py (R4)",
     "halt_evidence_unreachable": "rules/unreachable.py (R6)",
+    "halt_rule_error": "stop/controller.py: a criterion raised, so the gateway "
+    "could not judge the call and stops in DEGRADED (D17)",
     "block_declaration": "transport: unusable _meta.gateway.task",
     "block_unknown_tool": "transport: name is not in the current window",
     "block_schema_drift": "transport: the tool is frozen by a contract change",

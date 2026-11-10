@@ -131,6 +131,64 @@ class EmptyControllerTests(unittest.TestCase):
         self.assertEqual(controller.version, "rules-v0(a,b)")
 
 
+class RaisingRuleTests(unittest.TestCase):
+    """A criterion is code; code has bugs. A bug must not delete the record.
+
+    Before D17 the exception flew out of ``evaluate`` and out of
+    ``_handle_call`` *before* ``session.record_call``, so the call being judged
+    left no trace at all. Nothing can detect that afterwards: the chain the
+    record did not join still verifies (DESIGN 1.5).
+    """
+
+    class Boom:
+        def __init__(self, name: str, priority: int, stage: str = POST) -> None:
+            self.name = name
+            self.priority = priority
+            self.stage = stage
+
+        def check(self, ctx):
+            raise ZeroDivisionError("division by zero")
+
+    def test_a_raising_rule_becomes_a_verdict_instead_of_an_exception(self):
+        outcome = StopController([self.Boom("R9", 30)]).evaluate(POST, context())
+
+        self.assertTrue(outcome.hit, "the run must stop, not continue unguarded")
+        self.assertEqual(outcome.attempted, ("R9",))
+        self.assertEqual(outcome.verdict.rule, "R9")
+        self.assertEqual(outcome.verdict.decision, "halt_rule_error")
+        self.assertEqual(outcome.verdict.state, "DEGRADED")
+        self.assertIn("ZeroDivisionError", outcome.verdict.reason)
+        self.assertIn("division by zero", outcome.verdict.reason)
+
+    def test_the_reason_names_the_rule_that_failed(self):
+        # Two rules, the second one broken: the message must not be generic,
+        # because "which criterion do I go and fix" is the only question here.
+        healthy = FakeRule("R4", 30)
+        broken = self.Boom("R6", 50)
+        outcome = StopController([healthy, broken]).evaluate(POST, context())
+
+        self.assertEqual(outcome.attempted, ("R4", "R6"))
+        self.assertEqual(outcome.verdict.rule, "R6")
+        self.assertTrue(outcome.verdict.reason.startswith("rule R6 raised"))
+
+    def test_rules_after_the_failure_are_not_evaluated(self):
+        after = FakeRule("R3", 60, verdict=verdict("R3"))
+        outcome = StopController([self.Boom("R9", 30), after]).evaluate(POST, context())
+
+        self.assertEqual(outcome.attempted, ("R9",))
+        self.assertEqual(after.calls, [], "short circuit still applies to a failure")
+
+    def test_an_interrupt_is_not_swallowed(self):
+        # ``BaseException`` is excluded deliberately: a criterion that is merely
+        # being interrupted has not told us anything about the call.
+        class Interrupt(self.Boom):
+            def check(self, ctx):
+                raise KeyboardInterrupt
+
+        with self.assertRaises(KeyboardInterrupt):
+            StopController([Interrupt("R9", 30)]).evaluate(POST, context())
+
+
 class ContextTests(unittest.TestCase):
     def test_missing_is_required_minus_evidence(self):
         ctx = context(required=frozenset({"sql.rows", "sql.schema"}), evidence=frozenset({"sql.rows"}))

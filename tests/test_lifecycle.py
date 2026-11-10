@@ -142,6 +142,44 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(records[1]["stop_check"]["rule"], "R4")
         self.assertTrue(records[1]["stop_check"]["hit"])
 
+    def test_a_crashing_rule_still_leaves_a_record(self):
+        """The one failure that would otherwise be invisible afterwards.
+
+        A rule that raises is a bug in the gateway, and the honest response is
+        to stop. But stopping by *vanishing* -- exception out of
+        ``_handle_call`` before ``record_call`` -- leaves no trace line for the
+        call being judged, and a chain with a hole in it still verifies
+        (DESIGN 1.5). Measured in the D17 audit: zero records for one call.
+        """
+
+        class Exploding:
+            name = "R9"
+            priority = 30
+            stage = POST
+
+            def check(self, ctx):
+                raise ZeroDivisionError("boom")
+
+        session, results = self._run([Exploding()], [{"sql": "a"}])
+
+        records = self.records()
+        self.assertEqual(len(records), 1, "the judged call must still be recorded")
+        self.assertEqual(records[0]["decision"], "halt_rule_error")
+        self.assertEqual(records[0]["state"], "DEGRADED")
+        self.assertEqual(records[0]["stop_check"]["rule"], "R9")
+        self.assertTrue(records[0]["stop_check"]["hit"])
+        # The exception text is *not* in the sealed record: ``StopCheck`` has no
+        # free-text field and adding one would change the hashed shape, i.e. a
+        # schema version bump. It is in the notice the model receives and in
+        # ``session.stats()`` -- ``decision`` is what tells a reader that this
+        # was a fault, not a verdict.
+        self.assertEqual(session.halt_reason, "rule R9 raised ZeroDivisionError: boom")
+        # The data was already obtained, so the model gets it back with a notice
+        # rather than an error: the result is real, only the run is over.
+        self.assertFalse(results[0].is_error)
+        self.assertEqual(session.state, "DEGRADED")
+        self.assertTrue(verify_path(self.trace_path).ok)
+
     def test_halt_notice_is_appended_and_parsed(self):
         rule = Rule("R4", 30, POST, when=lambda ctx: True)
         _, results = self._run([rule], [{"sql": "a"}])

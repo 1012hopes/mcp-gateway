@@ -30,6 +30,18 @@ concatenation.
 At D6 the rule tuple was empty: the socket wired, no devices plugged in. Every
 trace said ``rules-v0(none)``, which was worth writing precisely because there
 was nothing else to say.
+
+A criterion that raises is a halt, not a crash
+----------------------------------------------
+Rules are code, so they have bugs. Originally a raising rule propagated out of
+``evaluate`` and out of ``_handle_call`` **before** ``session.record_call``, so
+the call being judged left no record at all -- and an unrecorded call is the one
+thing this design cannot detect afterwards, because the chain it did not join
+still verifies. So a crash is converted into a verdict: ``halt_rule_error`` in
+state ``DEGRADED``, naming the rule and the exception. The normal halt path then
+writes the record, and the run stops instead of pretending it judged the call.
+
+``BaseException`` is not caught on purpose: an interrupt must still interrupt.
 """
 
 from __future__ import annotations
@@ -180,7 +192,34 @@ class StopController:
             if rule.stage != stage:
                 continue
             attempted.append(rule.name)
-            verdict = rule.check(ctx)
+            try:
+                verdict = rule.check(ctx)
+            except Exception as exc:  # noqa: BLE001 -- a rule is code; code has bugs
+                # A raising rule must not be the one case that produces no
+                # record. It used to escape ``evaluate``, so the exception flew
+                # out of ``_handle_call`` before ``session.record_call`` and the
+                # call vanished from the trace -- which is exactly the blind
+                # spot this design exists to close (DESIGN 1.5: an unrecorded
+                # call cannot be detected afterwards, because the chain stays
+                # valid). Turning it into a verdict means the normal halt path
+                # runs: the record is written, it names the rule, and the run
+                # stops in ``DEGRADED`` rather than pretending to have judged.
+                return StopOutcome(
+                    verdict=StopVerdict(
+                        rule=rule.name,
+                        # A distinct decision, not ``halt_budget`` or a reused
+                        # one: "the criterion crashed" and "the criterion said
+                        # stop" are different facts, and a trace that merges
+                        # them cannot answer why a run ended.
+                        decision="halt_rule_error",
+                        state="DEGRADED",
+                        reason=(
+                            f"rule {rule.name} raised {type(exc).__name__}: "
+                            f"{str(exc)[:200] or '(no message)'}"
+                        ),
+                    ),
+                    attempted=tuple(attempted),
+                )
             if verdict is not None:
                 return StopOutcome(verdict=verdict, attempted=tuple(attempted))
         return StopOutcome(verdict=None, attempted=tuple(attempted))

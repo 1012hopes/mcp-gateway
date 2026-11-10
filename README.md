@@ -48,6 +48,7 @@ recursion_limit = 25  # LangGraph
 | D10 | run 边界声明 + 先脱敏再哈希 + `tool_calls` 串行化（**同一串调用：声明了就继续，不声明就误停**） | ✅ 384 tests |
 | D11 | 20 条任务（14 生产 + 6 对抗）+ 人工最优步数 + 扫描表（**182 次调用 → 65 次，20/20 达标**） | ✅ 430 tests |
 | D12 | checker（20 条 + 40 个样本自测）+ **G3 指标表**（**误停率 0/20、20/20 停对、省 64.3% 调用**） | ✅ 461 tests |
+| D13 | 三个脏上游（脏 schema / 脏协议 / 慢且抖）+ 兼容性自检（**31/31，一次超时只损失一次调用**） | ✅ 468 tests |
 
 ## 快速开始
 
@@ -82,6 +83,11 @@ uv run python scripts/make_fixtures.py
 
 # D12/G3：对照实验 —— 20 条任务各跑两遍，产出 results/table.md（六项指标）
 uv run python scripts/experiment.py
+
+# D13：四个上游（1 干净 + 3 故意脏）挂在一个网关上，31 项自检
+#      脏 schema / 脏协议（多块正文、null、非标错误码、list_changed 连发）
+#      / 慢且抖（超时、空结果、1.2 MB）——不崩，且证据抽取与干净上游一致
+uv run python scripts/compat_demo.py
 
 # G1 演示：正常运行 / 真实拔掉写权限 / 注入写盘失败
 uv run python scripts/failclosed_demo.py
@@ -405,12 +411,15 @@ gateway/
 agent/               客户端：policy（reactive / declared / futile）/ loop（驱动）/ tasks（任务规格）
 mcp_servers/sqlite_server.py        只读 SQLite 上游（8 张表，数据固定可复现）
 mcp_servers/dirty_schema_server.py  故意不合规的上游（$ref / oneOf / 非法名）
+mcp_servers/weird_capability_server.py 脏协议：多块正文 / null / 非标错误码 / list_changed 连发
+mcp_servers/slow_flaky_server.py    慢且抖：每 N 次超时、每 M 次空结果、单次 1.2 MB
 tasks/t01_unresolved_incidents.json 正常任务：唯一一条结果依赖的（reactive）
 tasks/t03..t15_*.json               13 条生产型：声明式计划 + required evidence
 tasks/t02,t16..t20_*.json           6 条对抗型：查不到的东西，问多少次都是空
 tasks/checkers/                     每任务一个 checker（core / productive / adversarial）
 tests/fixtures/{good,bad}/          40 个样本：20 个必须接受、20 个必须拒绝
 config/gateway.json                 上游、trace 目录、证据模型路径
+config/gateway-dirty.json           D13 的兼容面：干净 + 三个脏上游（不并进主配置，见 progress 39）
 config/evidence.json                冻结的证据模型（谁能生产、问什么、什么形状）
 config/schema-manifest.json         冻结的工具契约（入库，改上游后重跑冻结）
 scripts/echo_client.py              端到端驱动（固定调用表，D4 产物）
@@ -421,11 +430,13 @@ scripts/boundary_demo.py            D10：同一串调用，声明了就继续�
 scripts/task_sweep.py               D11：20 条任务 × (baseline, governed) -> results/tasks.md
 scripts/make_fixtures.py            D12：真实运行 -> good/bad 样本 + 当场互判（40/40）
 scripts/experiment.py               D12/G3：对照实验 -> results/table.md（六项指标）
+scripts/compat_demo.py              D13：四个上游一个网关 + 31 项自检（证据一致性在此钉住）
 scripts/failclosed_demo.py          G1 的 S1/S2/S3
 scripts/tamper_demo.py              8 个篡改用例
 scripts/freeze_schema.py            冻结 / `--check` 检查 schema 漂移
 docs/optimal-steps.md               最优步数怎么数：规则、逐条路径、四条已知代价
 results/tasks.md                    扫描表（生成物，随 commit 更新）
+docs/backlog.md                     想过但判断为"现在不做"的：每条写清什么条件下值得做
 docs/demo-g1.md                     G1 台词与录屏脚本
 docs/demo-g2.md                     G2 台词与录屏脚本
 ```
@@ -465,6 +476,9 @@ docs/demo-g2.md                     G2 台词与录屏脚本
 - **checker 只认"行集"形状的答案**：`count_rows` 返回 `{"count": 0}` 也是"没有这一行"的合理表达，但 checker 看不见它。当前所有策略都用 `sqlite.query`，换一个只用 count 的 agent，五条对抗任务的 checker 会报"从没问过"
 - **checker 的期望是冻结的读数，不是从数据推出来的**：字面量表是读 seed 抄下来、再由真实运行校验的。好处是 seed 一改 good 样本立刻红；代价是它证明"与这份数据一致"，不证明"与问题意图一致"——后者只能靠人复核那几十行
 - **"主题词守卫"是子串匹配**：空行集只在查询文本里出现 `ghost`/`typo`/`triage` 之类的词时才算答案。一条既不写主体也不写名字的改写会让守卫失效，所以 `tests/test_checkers.py` 遍历任务文件里每一条改写在守这件事
+- **超时是一次失败的调用，不是一次重试**：超时不含"调用有没有执行"的信息，重试会让轨迹声称一次调用、实际执行两次。所以网关记失败、run 继续，要不要再问由调用方决定（完全相同的重问会被 R1 拦下并回填）。可重试需要上游声明幂等性
+- **"第一个可解析的文本块"就是正文**：真 server 的横幅是散文，所以成立；把 `{"ok": true}` 放在正文前面的上游会让抽取器报告"没有证据"——一次有答案的调用被记成没答。这条被钉在 `tests/test_compat.py` 里，不是留给别人发现
+- **超过 1 MB 的结果只被标记，没有被裁剪**：`truncated: true` 让证据判定拒绝它，但完整 payload 仍交给模型，上游依然能用单次结果撑爆上下文。真裁剪必须在算摘要之前切，否则 `result_digest` 与模型看到的字节不再对应（`docs/backlog.md` 第 1 条）
 - **误停率的分母是 20 条任务**：一条误停就是 5%。表里报 0/20，不报"误停率 0.0% 所以没问题"——样本量只有这么大，能说的就这么多
 - 参数在 20 条任务上标定，样本量不做显著性检验，只报配对差值
 

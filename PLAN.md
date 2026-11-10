@@ -114,6 +114,14 @@
 | D14 | 11-27 | 准入 + 异构工具 | `selector.py`（BM25，K=5）、`mcp_servers/wiki_server.py` | Accuracy@5 相对全量下降 ≤ 10%；`wiki.search` 与 `gh.search` 构成易混淆样本 |
 | D15 | 11-30 | 回放视图 + README | `render.py`、`README.md`、`docs/faq.md` | 单文件 HTML 双击可看：点步看 `offered/chosen` 差集、篡改后链条标红、证据齐那步 R4 高亮 |
 
+> **D13 结果（记录）**：**完成**。`scripts/compat_demo.py` 一条命令跑出 **31/31 PASS**：四个上游（一个干净、三个脏）挂在同一个 registry 上，23 个工具名全部合法且唯一；`weird` 的十种坏结果没有一个让运行中断，`boom` 被记成一次 `forward` 的失败调用；`flake` 的五次查询里恰好一次超时、run 仍是 `RUNNING`、下一次调用仍然成功；三条轨迹全部 `verify` 通过，`results_delivered == records_written` 保持。四处与计划不同：
+> 1. **"超时重试"改为"超时即一次失败的调用"**。超时不告诉你调用有没有执行，重试会让轨迹声称一次调用而实际执行两次——那正是本项目禁止的空隙。重试要成立需要上游声明幂等性，已写进 `docs/backlog.md`。
+> 2. **"20% 超时"由随机改为确定性的每 N 次**，周期是命令行参数。随机失败只能靠"循环到坏分支出现"来测，且 demo 无法把同一处失败演示两遍。
+> 3. **判据那句话其实是两句**："信封不改变事实"（同一 body 的六种封装 → 同一证据集）与"不是正文的正文不产生事实"（错误标记带行集 / `null` / 空 content / 半截 JSON / 裸数字 → 空集）。只测前一句，一个什么都抽不出的抽取器也能全过。
+> 4. **截断的验证必须钉住 tool 与 args**。用脏上游的 `huge` 去测，"没证据"会被 producers 规则解释掉（生产者只有 `sqlite.query`），与截断无关。改为假上游把工具名固定，只改字节数。
+>
+> 一条实测发现：`slow_flaky_server` 最初用 `time.sleep` 制造超时，结果**之后每一次调用都超时**——同步 sleep 阻塞了 server 自己的事件循环，测出来的不是 deadline 而是"死进程"。改成 `await anyio.sleep` 后，"一次超时只损失一次调用"才是真的（`requests` 是并发的，慢 handler 不挡后者）。
+
 ### 缓冲（D16–D18）
 
 **只修 bug，不加功能。** 允许做的事：补测试、补 README、重录 demo、修 `--doctor`。任何"顺手加一个"的念头都写进 `docs/backlog.md`，不当场做。

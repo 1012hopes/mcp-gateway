@@ -136,6 +136,20 @@ class EvidenceModel:
         spec = self._types.get(ev_type)
         return spec.producers if spec else ()
 
+    def subjects_for(self, tool: str) -> Tuple[str, ...]:
+        """The fact types a tool is declared able to produce.
+
+        Read by the selector (D14) to build its index. The gateway knows two
+        things about a tool that its description may not say: which upstream
+        serves it and what kind of fact it can deliver. Only the second is
+        useful for ranking, and it is already written down here -- a selector
+        that had to infer "this ``query`` tool can answer questions about
+        incidents" from the sentence "run a read-only SELECT" would be guessing.
+        """
+        return tuple(
+            name for name in sorted(self._types) if tool in self._types[name].producers
+        )
+
     # -- reachability ------------------------------------------------------
 
     def unavailable(

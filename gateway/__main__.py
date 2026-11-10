@@ -70,6 +70,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-id", default=None)
     parser.add_argument("--trace-dir", default=None)
     parser.add_argument(
+        "--goal",
+        default="",
+        help="the run's goal in words, used only to rank tools (A1). Not written "
+        "to the trace: it belongs to the task file, and a second copy of it here "
+        "would be a second place to change it",
+    )
+    parser.add_argument(
         "--require",
         action="append",
         default=[],
@@ -210,6 +217,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             controller=build_controller(evidence, enabled=not args.no_rules),
             evidence=evidence,
             baseline=baseline,
+            goal=args.goal,
         )
     except ValueError as exc:
         _log(f"config error: {exc}")
@@ -228,6 +236,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         "schema baseline: "
         + ("frozen, drift will freeze tools" if baseline is not None else "absent (no drift check)")
     )
+    if config.gating.enabled:
+        _log(
+            f"gating: on (k={config.gating.k}, m={config.gating.m}, "
+            f"index={config.gating.index}) | goal: {args.goal or '(none)'}"
+        )
+    else:
+        _log("gating: off (offered = the whole catalogue)")
 
     try:
         anyio.run(_serve, gateway)

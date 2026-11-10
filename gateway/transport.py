@@ -14,9 +14,13 @@ gets called. Four consequences, in order of how easy they are to get wrong:
 
 3. **``offered`` is captured, not inferred.** It is the set of tools the agent
    could have picked from *at that moment*. Without it "was the wrong tool
-   chosen" has no denominator -- Accuracy@K is uncomputable (DESIGN 2.4). The
-   registry decides membership, so ``offered`` is exactly what ``tools/list``
-   returned; D14 will shrink it by gating and the field keeps its meaning.
+   chosen" has no denominator -- Accuracy@K is uncomputable (DESIGN 2.4). Until
+   D14 that set was the whole catalogue and the metric was 1.00 by construction;
+   now the selector decides it per turn, and a call to a catalogue tool outside
+   the window is forwarded, recorded as ``forward_outside``, and counted as a
+   miss. The invariant is therefore weaker than "chosen is always offered" and
+   sharper than nothing: *a forwarded call is either inside the window or says
+   it was not*.
 
 4. **The seven lifecycle steps are ordered, not merged.** Pre-stage guards (R5
    safety, R1 duplicate, R6 unreachable) run before the upstream is touched;
@@ -47,6 +51,7 @@ from .config import GatewayConfig
 from .evidence import EvidenceModel
 from .limits import CallSignature
 from .registry import Registry, ToolEntry, build_registry
+from .selector import Selector, Window, sticky_seed
 from .session import MAX_RESULT_BYTES, RunSession, digest_result
 from .stop import POST, PRE, StopContext, StopController, StopVerdict, merge_checks
 from .trace.sink import TraceChainError, TraceWriteError
@@ -59,6 +64,16 @@ __all__ = ["Gateway", "result_payload", "text_result", "error_result"]
 #: How many delivered results stay replayable. Above any plausible run length
 #: (the default call budget is 24) so a miss means a bug, not bookkeeping.
 DELIVERED_CACHE_LIMIT = 64
+
+#: How many past calls the gating query looks at. A1 says "the last two turns";
+#: in a gateway that sees calls rather than messages, a turn *is* a call.
+QUERY_WINDOW = 2
+
+#: Characters of one argument value that enter the gating query. A 4 KB SQL
+#: statement would otherwise drown the goal sentence it is supposed to be read
+#: with -- and BM25's term saturation does not fix that, it just makes every
+#: repeated token worth less than a novel one.
+QUERY_ARG_CHARS = 400
 
 
 def result_payload(result: types.CallToolResult) -> Dict[str, Any]:
@@ -74,6 +89,73 @@ def text_result(text: str, *, is_error: bool = False) -> types.CallToolResult:
 
 def error_result(message: str) -> types.CallToolResult:
     return text_result(message, is_error=True)
+
+
+def _arg_text(args: Mapping[str, Any]) -> List[str]:
+    """String values from a call's arguments, one level of nesting deep.
+
+    Only scalars and lists of scalars: an argument that is itself an object
+    (``filter: {"label": "bug"}``) is flattened one level so its values still
+    reach the query, but nothing is JSON-dumped -- braces and quotes are tokens
+    too, and they would be tokens no document ever contains.
+    """
+    out: List[str] = []
+
+    def take(value: Any) -> None:
+        if isinstance(value, str):
+            out.append(value[:QUERY_ARG_CHARS])
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            out.append(str(value))
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                take(item)
+        elif isinstance(value, Mapping):
+            for item in value.values():
+                take(item)
+
+    for value in args.values():
+        take(value)
+    return out
+
+
+def _result_text(payload: Mapping[str, Any]) -> str:
+    """The head of what the upstream said, for the next turn's ranking query.
+
+    Only text blocks, only the first ``QUERY_ARG_CHARS`` characters, and only
+    when the call produced data -- an error message would put the gateway's own
+    words into its own ranking, which is the sort of loop that looks like
+    intelligence and is not.
+    """
+    if not isinstance(payload, Mapping) or payload.get("is_error"):
+        return ""
+    chunks: List[str] = []
+    for block in payload.get("content") or ():
+        if isinstance(block, Mapping) and block.get("type") == "text":
+            text = block.get("text")
+            if isinstance(text, str):
+                chunks.append(result_head(text))
+    return " ".join(chunks)
+
+
+def result_head(text: Any) -> str:
+    """The part of one text block that enters the next turn's ranking query."""
+    return str(text or "")[:QUERY_ARG_CHARS]
+
+
+def gating_query(goal: str, recent: Sequence[tuple]) -> str:
+    """One definition of the ranking query, shared with the demo's replay.
+
+    The demo recomputes every window offline and requires it to equal the
+    ``offered`` list the gateway recorded. Two implementations of this function
+    would make that check compare the demo against itself.
+    """
+    parts: List[str] = [goal]
+    for tool, args, result in list(recent)[-QUERY_WINDOW:]:
+        parts.append(tool)
+        parts.extend(_arg_text(args))
+        if result:
+            parts.append(result)
+    return " ".join(part for part in parts if part)
 
 
 class _Blocked(Exception):
@@ -98,6 +180,8 @@ class Gateway:
         evidence: Optional[EvidenceModel] = None,
         baseline: Optional[Mapping[str, str]] = None,
         clock: Callable[[], float] = time.monotonic,
+        goal: str = "",
+        selector: Optional[Selector] = None,
     ) -> None:
         self.config = config
         self.upstreams = list(upstreams)
@@ -136,6 +220,36 @@ class Gateway:
         #: not payloads, so this is the only place a payload can be replayed
         #: from (DESIGN 2.4 -- the trace cannot be read back as a data store).
         self._delivered: Dict[CallSignature, types.CallToolResult] = {}
+        #: The run's stated goal, from ``--goal``. Part of the gating query, not
+        #: of the trace: a goal is a property of the task file, and copying it
+        #: into every record would be the second source of truth this project
+        #: keeps refusing to create.
+        self._goal = goal.strip()
+        #: A1's window (D14). ``None`` when gating is off, which is the default
+        #: for every config that does not ask for it -- older traces record the
+        #: whole catalogue in ``offered`` and must keep meaning that.
+        self._selector = selector
+        if self._selector is None and config.gating.enabled:
+            # Index text per tool, from what the deployment declares the tool
+            # can deliver. Built once, from names the model knows before any
+            # upstream is contacted: the same tokens on every turn, so the
+            # selector still has to rank live.
+            subjects: Dict[str, List[str]] = {}
+            for ev_type in self.evidence_model.types:
+                for producer in self.evidence_model.producers(ev_type):
+                    subjects.setdefault(producer, []).append(ev_type)
+            self._selector = Selector(
+                k=config.gating.k,
+                m=config.gating.m,
+                variant=config.gating.index,
+                selector_subjects=subjects,
+            )
+        #: ``(tool, args)`` of the calls that were recorded, most recent last.
+        #: The gating query is built from here because the session keeps only
+        #: ``(tool, args_hash)`` -- by design, the trace does not store arguments.
+        self._recent: List[tuple] = []
+        #: The window the previous call was shown, for A1's stability merge.
+        self._window: Optional[Window] = None
         for upstream in self.upstreams:
             if upstream.name in self._by_upstream:
                 # Two servers under one prefix would silently shadow each other
@@ -165,11 +279,77 @@ class Gateway:
         """The tools the agent may pick from right now (frozen ones excluded)."""
         return list((await self.registry(refresh=refresh)).offered)
 
+    # -- A1: the window (D14) ----------------------------------------------
+
+    @property
+    def gating_enabled(self) -> bool:
+        return self._selector is not None
+
+    def _query(self) -> str:
+        """The ranking query: the goal, plus the last two calls and what they said.
+
+        A1 asks for "the last two turns of the conversation plus the task
+        description". A gateway does not see the conversation, so the honest
+        substitution is the calls themselves -- their names (what the run was
+        doing), their argument text (what it was asking about) and the head of
+        what came back (what it now knows). Results belong in the query for the
+        same reason they belong in a conversation: after hearing that the tables
+        are ``incidents``, ``repos`` and ``commits``, the next thing one does is
+        describe one of them, and a ranker that only hears the question cannot
+        know that.
+
+        Nothing here is persisted, so the trace keeps digests rather than data
+        (DESIGN 2.3); what the window *produced* is recorded as ``offered``,
+        which is the auditable part.
+        """
+        return gating_query(self._goal, self._recent)
+
+    def _pins(self, offered: Sequence[str]) -> List[str]:
+        """Tools the window must keep because a required fact still needs them.
+
+        This is the one rule A1 does not have, and it is not a refinement: R6
+        decides "this task can never finish" by looking at ``offered``. Without
+        the pin, narrowing the window can make R6 report ``DEGRADED`` for a run
+        whose producer exists but ranked sixth -- a correct run declared
+        impossible by the feature that was only supposed to save context.
+        """
+        missing = self.session.required - set(self.session.evidence)
+        servable = set(offered)
+        pins: List[str] = []
+        for ev_type in sorted(missing):
+            for producer in self.evidence_model.producers(ev_type):
+                if producer in servable and producer not in pins:
+                    pins.append(producer)
+        return pins
+
+    async def window(self, *, refresh: bool = False) -> Window:
+        """The surface for the next call, and why it has that shape."""
+        registry = await self.registry(refresh=refresh)
+        entries = registry.offered
+        names = [entry.exposed_name for entry in entries]
+        if self._selector is None:
+            return Window(tuple(names), "gating_off")
+        return self._selector.window(
+            self._query(),
+            entries,
+            previous=sticky_seed(self._window),
+            pins=self._pins(names),
+            # Cold start: nothing has happened in this run yet, so there is no
+            # context to rank by and a window guessed from the goal sentence
+            # would hide exactly the structural tools such a sentence never
+            # names (``list_tables``, ``describe_table``).
+            cold_start=not self._recent,
+        )
+
     # -- MCP handlers ------------------------------------------------------
 
     async def handle_list_tools(self, ctx: Any, params: Any) -> types.ListToolsResult:
         registry = await self.registry()
-        return types.ListToolsResult(tools=[entry.to_mcp() for entry in registry.offered])
+        window = await self.window()
+        keep = set(window.names)
+        return types.ListToolsResult(
+            tools=[entry.to_mcp() for entry in registry.offered if entry.exposed_name in keep]
+        )
 
     def stop_context(
         self,
@@ -286,6 +466,11 @@ class Gateway:
         # R1's replay cache is per run. A cross-run replay would hand the new
         # topic an answer from the old one and call it a duplicate.
         self._delivered.clear()
+        # The window's context is per run for the same reason: carrying the old
+        # topic's calls into the new one would rank the new topic's tools by the
+        # old topic's words, and every new run starts cold by definition.
+        self._recent.clear()
+        self._window = None
         print(
             f"run boundary: {current.run_id} -> {new.run_id} | {declaration.describe()}",
             file=sys.stderr,
@@ -326,7 +511,13 @@ class Gateway:
 
         registry = await self.registry()
         chosen = params.name
-        offered = registry.offered_names()
+        window = await self.window()
+        offered = list(window.names)
+        #: Gating is attention, not permission: a catalogue tool outside the
+        #: window is still forwarded. Recorded as a distinct decision so the
+        #: trace answers "was it offered" without reading anything else.
+        outside = self.gating_enabled and chosen not in window
+        self._window = window
         entry = registry.get(chosen)
         args = dict(params.arguments or {})
         signature = session.proposed_signature(chosen, args)
@@ -394,6 +585,11 @@ class Gateway:
                 entry, chosen, offered, args, blocked=boundary_error
             )
             decision = forwarded_decision
+            if outside and decision == "forward":
+                # Only a call that actually reached the upstream is "outside the
+                # window": a refusal already has a decision that says why, and
+                # overwriting it would hide the reason.
+                decision = "forward_outside"
 
             # -- steps 5-6: evidence, then post-stage guards ---------------
             # Truncation is decided *before* extraction, not after. A payload
@@ -472,6 +668,13 @@ class Gateway:
             # R1's replay hands back an earlier result whose digest is already
             # absorbed.
             session.commit_result(committed)
+        # The window's own short-term memory, updated with the same rule as
+        # ``session.history``: only calls that were recorded are context. A call
+        # that fail-closed before the write must not shape the next window, or
+        # the surface would depend on something the trace cannot show.
+        self._recent.append((chosen, dict(args), _result_text(payload)))
+        if len(self._recent) > QUERY_WINDOW * 4:
+            del self._recent[: -QUERY_WINDOW * 2]
 
         if keep_result:
             # Remembered only after the record landed: the cache is a cache of

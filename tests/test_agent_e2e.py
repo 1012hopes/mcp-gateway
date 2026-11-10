@@ -129,7 +129,15 @@ class _RunMixin:
     def test_every_record_carries_the_fields_that_make_it_judgeable(self):
         for record in self.records:
             self.assertTrue(record["offered"], record["seq"])
-            self.assertIn(record["chosen"], record["offered"])
+            # Since D14 the window can be narrower than the call the agent made.
+            # The invariant a reader can rely on is not "the tool was offered"
+            # but "the record says which of the two happened" -- a forwarded
+            # call either was in the window or carries ``forward_outside``.
+            self.assertTrue(
+                record["chosen"] in record["offered"]
+                or record["decision"] == "forward_outside",
+                record["seq"],
+            )
             self.assertTrue(record["prev_hash"])
             self.assertTrue(record["args_hash"])
             self.assertTrue(record["result_digest"])

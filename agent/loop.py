@@ -48,6 +48,10 @@ class RunResult:
     trace_path: Path
     tools: Tuple[str, ...]
     turns: List[Observation] = field(default_factory=list)
+    #: The tool surface this agent saw on each turn. With gating on (D14) it
+    #: shrinks after the cold start; keeping it makes "the plan never needed a
+    #: tool the window hid" checkable without re-reading the gateway's logs.
+    visible: List[Tuple[str, ...]] = field(default_factory=list)
     halt: Optional[Dict[str, str]] = None
     stop_reason: str = ""
     protocol: str = ""
@@ -116,8 +120,16 @@ async def run_task(
             result.tools = tuple(tool.name for tool in listing.tools)
 
             while len(result.turns) < task.max_turns:
+                # Re-list every turn: the gateway's window (A1, D14) can change
+                # as the run learns, and a client that kept the first listing
+                # would plan from a surface the gateway no longer shows. This is
+                # one round trip per turn and it is the honest reading of
+                # "offered is what the agent could pick from right now".
+                listing = await session.list_tools()
+                visible = tuple(tool.name for tool in listing.tools)
+                result.visible.append(visible)
                 ctx = AgentContext(
-                    task=task, tools=result.tools, history=tuple(result.turns)
+                    task=task, tools=visible, history=tuple(result.turns)
                 )
                 action = policy.next_action(ctx)
                 if action is None:

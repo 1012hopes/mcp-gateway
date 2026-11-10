@@ -103,6 +103,11 @@ class TaskSpec:
 
     def gateway_args(self) -> List[str]:
         args: List[str] = []
+        if self.goal:
+            # The gateway cannot see the conversation, so the goal travels with
+            # the run. It is the only input the selector gets that the agent
+            # knows and the gateway does not.
+            args.extend(["--goal", self.goal])
         for ev_type in self.required_evidence:
             args.extend(["--require", ev_type])
         if self.max_calls is not None:

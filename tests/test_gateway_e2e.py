@@ -69,11 +69,15 @@ class GatewayEndToEndTests(unittest.TestCase):
 
     def test_tools_are_namespaced_by_upstream(self):
         names = self.outcome["tools"]
-        self.assertEqual(len(names), 10)
         self.assertEqual(len(set(names)), len(names), "exposed names must be unique")
         for name in names:
             self.assertEqual(name.count("."), 1, name)
-        self.assertEqual({name.split(".")[0] for name in names}, {"sqlite", "dirty"})
+        # The catalogue grew to four upstreams in D14 (wiki and gh are the
+        # decoys the gating window has to rank against). Counting tools here
+        # would make this test a census; what it is about is the namespace.
+        self.assertEqual(
+            {name.split(".")[0] for name in names}, {"sqlite", "dirty", "wiki", "gh"}
+        )
 
     def test_same_short_name_from_two_upstreams_coexists(self):
         # The reason namespacing exists at all: both servers ship a ``query``.

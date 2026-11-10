@@ -169,10 +169,19 @@ def saved_rate(baseline_calls: int, governed_calls: int) -> float:
 def accuracy_at_k(records: Sequence[Mapping[str, Any]]) -> Tuple[int, int]:
     """(chosen ∈ offered, records) -- A6's Accuracy@K, counted from the trace.
 
-    Reported but not yet *informative*: until D14's selector exists, ``offered``
-    is the whole catalogue, so the correct tool is always present and the number
-    is 1.00 by construction. The experiment prints that caveat next to the value
-    rather than leaving a reader to infer it.
+    Since D14 ``offered`` is the gating window of that turn, so this is a real
+    measurement: the share of calls whose tool the window was showing. Two
+    readings matter and they are not the same number:
+
+    * a **governed** run at 1.00 says the window always contained what the run
+      needed -- the gate cost no selection on this task set;
+    * a **baseline** run below 1.00 (0.95 on the twenty tasks) misses only in
+      the post-completion "verify again" phase, where the run goes back to tools
+      the window has moved away from. That is waste seen from the selection
+      layer, and it is why the two columns differ at all.
+
+    Before D14 both were 1.00 by construction -- ``offered`` was the whole
+    catalogue -- and the table said so in a footnote instead of pretending.
     """
     hits = total = 0
     for record in records:

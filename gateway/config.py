@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Mapping, Optional
 
 __all__ = [
     "GatewayConfig",
+    "GatingSpec",
     "UpstreamSpec",
     "load_config",
     "DEFAULT_CONFIG_PATH",
@@ -35,6 +36,32 @@ DEFAULT_CONFIG_PATH = REPO_ROOT / "config" / "gateway.json"
 
 def repo_root() -> Path:
     return REPO_ROOT
+
+
+@dataclass(frozen=True)
+class GatingSpec:
+    """A1's window, as configuration.
+
+    Disabled by default, and that default is load-bearing: every trace written
+    before D14 records ``offered`` as the whole catalogue, and a config file
+    that silently switched to a narrower surface would make those files describe
+    a gateway that no longer exists. A deployment opts in, and the config it
+    opted in with is on disk.
+    """
+
+    enabled: bool = False
+    k: int = 5
+    m: int = 10
+    #: ``name`` / ``description`` / ``enriched`` -- see ``selector.INDEX_VARIANTS``.
+    #: Kept configurable because the demo reports all three: the difference
+    #: between them is the only honest account of why the gate works.
+    index: str = "enriched"
+
+    def __post_init__(self) -> None:
+        if self.k < 1:
+            raise ValueError(f"gating.k must be >= 1, got {self.k}")
+        if self.m < self.k:
+            raise ValueError(f"gating.m must be >= gating.k ({self.m} < {self.k})")
 
 
 @dataclass(frozen=True)
@@ -59,6 +86,7 @@ class GatewayConfig:
     #: silently never completes.
     evidence_model: Path = REPO_ROOT / "config" / "evidence.json"
     upstreams: List[UpstreamSpec] = field(default_factory=list)
+    gating: GatingSpec = field(default_factory=GatingSpec)
 
     @property
     def trace_root(self) -> Path:
@@ -98,6 +126,16 @@ def load_config(path: Optional[str] = None) -> GatewayConfig:
     if not specs:
         raise ValueError(f"no upstreams configured in {config_path}")
 
+    raw_gating = gateway.get("gating") or {}
+    if not isinstance(raw_gating, dict):
+        raise ValueError(f"gateway.gating must be an object in {config_path}")
+    gating = GatingSpec(
+        enabled=bool(raw_gating.get("enabled", False)),
+        k=int(raw_gating.get("k", 5)),
+        m=int(raw_gating.get("m", 10)),
+        index=str(raw_gating.get("index", "enriched")),
+    )
+
     return GatewayConfig(
         name=gateway.get("name", "mcp-gateway"),
         trace_dir=_path(gateway.get("trace_dir", "traces/runs")),
@@ -105,4 +143,5 @@ def load_config(path: Optional[str] = None) -> GatewayConfig:
         schema_manifest=_path(gateway.get("schema_manifest", "config/schema-manifest.json")),
         evidence_model=_path(gateway.get("evidence_model", "config/evidence.json")),
         upstreams=specs,
+        gating=gating,
     )

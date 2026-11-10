@@ -267,9 +267,25 @@ class DeclaredPolicyBehaviourTests(unittest.TestCase):
             evidence |= set(model.extract(_answer(Action(step.tool, step.args)), tool=step.tool, args=step.args))
         self.assertLessEqual(set(self.task.required_evidence), evidence)
 
-    def test_an_unoffered_tool_is_skipped_not_retried(self):
+    def test_an_unoffered_plan_step_is_skipped_but_the_tail_is_not(self):
+        # Two different rules, deliberately (D14):
+        # * the *plan* is what a model chooses, and a model cannot choose a tool
+        #   it was not shown -- so a hidden plan step is skipped, not retried;
+        # * the *tail* is the fixed program that measures post-completion waste,
+        #   and it is the denominator of "saved calls", so it must not shrink
+        #   when the window narrows. Filtering it made the baseline fall from
+        #   182 calls to 175 for no reason but the gate.
         actions = _simulate(self.task, ("sqlite.query",))
-        self.assertTrue(all(action.tool == "sqlite.query" for action in actions), actions)
+        plan_queries = [
+            Action(step.tool, dict(step.args))
+            for step in self.task.plan
+            if step.tool == "sqlite.query"
+        ]
+        self.assertEqual(actions[: len(plan_queries)], plan_queries)
+        self.assertTrue(
+            any(action.tool != "sqlite.query" for action in actions[len(plan_queries) :]),
+            actions,
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

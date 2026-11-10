@@ -234,9 +234,37 @@ class ReactivePolicy:
             if not self._performed(ctx.history, action):
                 return action
 
-        done = self._verify_done(ctx, plan)
-        verify = [action for action in VERIFY_PLAN if self._offered(ctx, action)]
-        return verify[done] if done < len(verify) else None
+        return self._next_verify(ctx, plan)
+
+    def _next_verify(self, ctx: AgentContext, plan: Sequence[Action]) -> Optional[Action]:
+        """The first "just to be sure" call this run has not made yet.
+
+        Written as a predicate over *performed* actions rather than as a
+        position ("how many calls since the anchor"), because a position and a
+        list filtered by the current window disagree the moment the window
+        changes, and the agent then repeats a call it already made. Measured
+        with positional counting plus window filtering (D14): the baseline ran
+        its closing query twice and had two byte-identical pairs instead of one,
+        which would have made "the baseline contains exactly one duplicate" a
+        property of the catalogue rather than of the agent.
+
+        An action the window currently hides is skipped, not waited for: the
+        overshoot must terminate even if a tool never comes back.
+        """
+        anchor = plan[-1]
+        index = None
+        for position, obs in enumerate(ctx.history):
+            if obs.asked(anchor.tool, anchor.args):
+                index = position
+        after = ctx.history[index + 1 :] if index is not None else ()
+
+        for action in VERIFY_PLAN:
+            if not self._offered(ctx, action):
+                continue
+            if any(obs.asked(action.tool, action.args) for obs in after):
+                continue
+            return action
+        return None
 
     # -- the useful phase --------------------------------------------------
 
@@ -277,26 +305,6 @@ class ReactivePolicy:
         return [row for row in rows if isinstance(row, dict)]
 
     # -- the overshoot phase ----------------------------------------------
-
-    def _verify_done(self, ctx: AgentContext, plan: Sequence[Action]) -> int:
-        """How many verification rounds already happened.
-
-        Anchored to the *last* useful action (the enrichment query), which never
-        appears in ``VERIFY_PLAN``. Anchoring to "the last call that looks
-        useful" would not work: the first verification round is byte-identical
-        to an earlier useful call, so the anchor would keep moving forward and
-        the loop would never advance.
-        """
-        if len(plan) < 4:
-            return 0
-        anchor = plan[-1]
-        index = None
-        for position, obs in enumerate(ctx.history):
-            if obs.asked(anchor.tool, anchor.args):
-                index = position
-        if index is None:
-            return 0
-        return len(ctx.history) - index - 1
 
     # -- helpers -----------------------------------------------------------
 
@@ -357,8 +365,7 @@ class DeclaredPolicy:
                 return action
 
         tail = self._tail(ctx, plan)
-        done = self._tail_done(ctx.history, plan)
-        return tail[done] if done < len(tail) else None
+        return self._next_tail(ctx, plan, tail)
 
     # -- the useful phase --------------------------------------------------
 
@@ -393,25 +400,46 @@ class DeclaredPolicy:
             # Two facts in, two facts to re-check. One re-read per query is what
             # "double-check the answer" means when the answer has two halves.
             tail.append(Action("sqlite.query", {**queries[0].args, "limit": 10}))
-        return [action for action in tail if action.tool in ctx.tools]
+        # Unfiltered, unlike the plan above. The plan is what a *model* chooses,
+        # and a model cannot choose what it was not shown; the tail is the fixed
+        # program that measures how much an agent wastes after it is done, and
+        # that number is the denominator of "saved calls" -- so it must not
+        # depend on the width of the window under test. Measured the other way
+        # (filtered): the baseline fell from 182 calls to 175, purely because
+        # the gate hid four re-checks, and "saved 64.3%" quietly became 62.9%.
+        return tail
 
-    @staticmethod
-    def _tail_done(history: Sequence[Observation], plan: Sequence[Action]) -> int:
-        """How many tail calls already happened.
+    def _next_tail(
+        self, ctx: AgentContext, plan: Sequence[Action], tail: Sequence[Action]
+    ) -> Optional[Action]:
+        """The first tail call this run has not made yet.
+
+        Predicate over performed actions, not a position in the list. The tail
+        used to be counted positionally, and when a tool dropped out of the
+        window the filtered list and the position disagreed: the agent then
+        repeated a call it had already made (D14 measured it -- the closing
+        query ran twice, so the baseline had two byte-identical pairs where it
+        should have had one).
 
         Anchored to the *first* occurrence of the plan's last action, not the
         last. The tail opens with an exact repeat of that action, so a
         last-occurrence anchor would move forward on every step and the loop
-        would never advance past the first re-check -- the same trap
-        ``ReactivePolicy`` documents, in the opposite direction. Requiring plan
-        steps to be distinct (``tests/test_taskset.py``) is what makes "first
-        occurrence" the plan step rather than an earlier identical one.
+        would never advance past the first re-check. Requiring plan steps to be
+        distinct (``tests/test_taskset.py``) is what makes "first occurrence"
+        the plan step rather than an earlier identical one.
         """
         anchor = plan[-1]
-        for position, obs in enumerate(history):
+        index = None
+        for position, obs in enumerate(ctx.history):
             if obs.asked(anchor.tool, anchor.args):
-                return len(history) - position - 1
-        return 0
+                index = position
+                break
+        after = ctx.history[index + 1 :] if index is not None else ()
+
+        for action in tail:
+            if not self._performed(after, action):
+                return action
+        return None
 
 
 _TABLE_RE = re.compile(r"\bfrom\s+([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)

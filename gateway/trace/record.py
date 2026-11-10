@@ -92,10 +92,14 @@ RUN_STATES = frozenset(
     }
 )
 
-#: DESIGN 2.4 decision names.
+#: DESIGN 2.4 decision names. ``forward_outside`` (D14) is the one case where a
+#: call reached the upstream although the gating window did not show it: the
+#: window is an attention device, and recording the miss is the alternative to
+#: either hiding it or turning it into a failed task.
 DECISIONS = frozenset(
     {
         "forward",
+        "forward_outside",
         "block_policy",
         "block_duplicate",
         "halt_complete",

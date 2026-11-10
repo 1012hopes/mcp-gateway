@@ -3,7 +3,13 @@
     "name": "mcp-gateway",
     "trace_dir": "traces/runs",
     "model_id": "unlabeled-agent",
-    "schema_manifest": "config/schema-manifest.json"
+    "schema_manifest": "config/schema-manifest.json",
+    "gating": {
+      "enabled": true,
+      "k": 5,
+      "m": 10,
+      "index": "enriched"
+    }
   },
   "upstreams": [
     {
@@ -17,6 +23,20 @@
       "name": "dirty",
       "command": "{python}",
       "args": ["-m", "mcp_servers.dirty_schema_server"],
+      "cwd": "{root}",
+      "call_timeout_s": 20
+    },
+    {
+      "name": "wiki",
+      "command": "{python}",
+      "args": ["-m", "mcp_servers.wiki_server"],
+      "cwd": "{root}",
+      "call_timeout_s": 20
+    },
+    {
+      "name": "gh",
+      "command": "{python}",
+      "args": ["-m", "mcp_servers.gh_server"],
       "cwd": "{root}",
       "call_timeout_s": 20
     }

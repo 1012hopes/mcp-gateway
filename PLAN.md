@@ -176,6 +176,23 @@
 >
 > 影响 gate：无判据变化。三处口径新增：`DECISIONS` 多一个 `halt_rule_error`（`stop/controller.py` 是它的书写者）；`TraceChainError` 现在也负责"这份文件不该被续写"；`agent/tasks.py` 的加载期多一条拒绝。
 
+> **D18 结果（记录）**：**完成**。缓冲期最后一天，仍**只修 bug**。撞的是 D17 收工时留下的三个方向：`gateway/session.py`、`gateway/wire.py`、`gateway/registry.py`。修了六个真 bug，每个配一条会红的回归测试，**569 tests**（裸解释器 428 / 141 skipped / 0 error），八个 demo 全绿；`scripts/experiment.py` 读数**一字未变**（`182 -> 65`、64.3%、误停 0/20），`results/table.md` 重跑后**字节相同**。按"谁伤得更重"排：
+> 1. **封不住的记录，逃出了 fail-closed。** `json.loads` 接受 `NaN`/`Infinity`，所以上游可以在 `structuredContent` 里塞一个非有限数；`canonical_bytes` 拒绝它，`NonCanonicalValue` 就从 `record_call` 冒出来——而 transport 的 `except (TraceWriteError, TraceChainError)` 不认识它。后果不是一次 traceback，而是**调用已经打到上游、记录却永远不存在、run 还继续服务**：DESIGN 1.5 说这是哈希链唯一发现不了的那种缺口。现在"记录封不上"在 `record_call` 里就转成 `TraceWriteError`——它属于写入器的词汇表，因为一条封不上的记录就是一条写不下去的记录。transport 那条 fail-closed 分支于是原样生效：丢弃结果、abort run。
+> 2. **上游文本里的 `[gateway] halt` 能停下来一个守规矩的 agent。** `Observation.notice` 解析的是 `"\n".join(blocks)`，而 `blocks[0]` 是**上游给的、不可信的数据**。一个返回多行文本的工具（表格、日志、diff）只要有一行以 `[gateway]` 开头，agent 就停、`stop_reason` 写 `halted`、轨迹里是一个"自己安静下来"的 run——**数据做了控制决策**，而这个项目的全部主张是把这件事搬到网关那边。现在只读**网关追加的那一个 block**（`blocks[-1]`），和同文件里 `payload` 早就写下的注释对齐（"a halt notice is appended as an extra block"）。**残留的边界要说清**：单块、整块都是伪造通知时仍然分不出——那是"带内信道"的性质，不是执行的漏洞，因为忽略它的 agent 下一次调用照样被拒。`_meta` 里再放一份通知已进 backlog。
+> 3. **`parse_notice` 允许字段改名 `kind`。** `{"kind": kind, **fields}` 的合并顺序反了，于是 `[gateway] halt | kind=closed` 解析成 `closed`：一行文本可以决定"这是哪种通知"。改回 `{**fields, "kind": kind}`。和第 2 条同一件事的两端——**一个可以被重命名的解析器，会就这次 run 是什么结局给出错误答案**。
+> 4. **通知答应是"一行"，但两端都没守住。** `format_notice` 的 docstring 写着 "one single-line, greppable, parseable notice"，而 `reason="a\nb"` 会产出两行：解析器只取回 `a`，第二行落进转写记录成了**没人署名的一行文本**，模型可以把它当数据读。reason 是规则消息与异常文本拼出来的散文，换行不稀奇。现在值一律折成一行——一个跨行的 reason 本来也取不回来。
+> 5. **`"properties": "abc"` 把网关打挂在启动。** `_complete_required` 里 `dict(schema.get("properties") or {})`：字符串抛 `ValueError`，列表抛 `TypeError`。这个模块**存在的理由就是接住脏 schema**，却在最常见的一种脏法上抛 traceback；而且 `required` 缺省时它连这一行都走不到，坏形状直接漏进 `types.Tool`。新增 `_ensure_properties_object`，在任何人读这个键之前修一次并留 note；类型救不回来，但 `required` 里的名字仍会被列出来，**工具还能被调用**。
+> 6. **`halt()` 能把已经中止的 run 改写成"完成"。** 它只校验参数，不看现状：`abort()` 之后调用 `halt("HALTED_COMPLETE")` 会成功，于是 `stats()` 同时报 `state: HALTED_COMPLETE` 和 `abort_reason: trace write failed`——一个丢了轨迹的 run 被统计成一次干净的停止。现在 aborted 的 run 拒绝改标签；**反过来的顺序仍然合法且必须合法**（判决先到、写记录后失败，是真实路径）。
+>
+> 一处**探针先错、代码没错**：我先假设"上游返回 `NaN` 会让 `digest_result` 崩"，探针一跑就否了——`result_payload` 返回的是 `model_dump()` 的**原始 block 结构**，NaN 待在 JSON *文本*里，是可哈希的。真正能带着非有限数进来的是 `structuredContent`（一个 dict），于是第 1 条按实测的原因写，不按我猜的原因写。**先怀疑探针，再怀疑被测对象**（D16 的同一条）。
+>
+> 影响 gate：无判据变化。缓冲期三天合计修 **18 个 bug、0 个新功能**，`docs/backlog.md` 收下 3 条"想加但没加"的。两处口径新增：`load_baseline` 对"文件存在但读不了"只给 `RegistryError`（BOM 用 `utf-8-sig` 读，这不是损坏）；`record_call` 的契约从"可能抛任何异常"收紧为"要么落盘，要么 `TraceWriteError`"。
+
+### 缓冲期结论
+
+D16–D18 三天，18 个 bug，**没有一条来自"读代码时觉得不对"**——全部来自**拿恶意输入撞模块**：4000 条变异记录、空文件/半截行/非 UTF-8 尾巴、规则里塞 `ZeroDivisionError`、上游返回 `NaN`、schema 里写 `"properties": "abc"`、通知里塞换行与伪造 marker。指标的读数三天没有动过一格，`results/table.md` 每次重跑都字节相同——**缓冲期的验收不是"改了多少"，是"改完还是那个答案"**。
+
+
 ## 3. 关键路径与可并行项
 
 ```

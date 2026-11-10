@@ -6,10 +6,37 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gateway.session import RunSession, digest_of
+from gateway.session import (
+    MAX_RESULT_BYTES,
+    RunSession,
+    digest_of,
+    result_size_bytes,
+)
 from gateway.trace.record import genesis_hash
 from gateway.trace.sink import JsonlSink
 from gateway.trace.verify import verify_path
+
+
+class ResultSizeTests(unittest.TestCase):
+    """``MAX_RESULT_BYTES`` is a byte threshold; the check has to agree.
+
+    Measured failure: a 1.2 MB page of Chinese counted as 400 k characters and
+    went unflagged, while the same number of bytes of ASCII was flagged. The
+    direction matters -- an unflagged partial result is what lets R4 claim
+    completion on half a row set.
+    """
+
+    def test_the_same_byte_size_flags_the_same_way_in_any_script(self):
+        wide = 400_000  # 1.2 MB as UTF-8 (three bytes per character)
+        cjk = {"rows": [{"body": "\u4e2d" * wide}]}
+        ascii_same_bytes = {"rows": [{"body": "x" * (wide * 3)}]}
+        self.assertGreater(result_size_bytes(cjk), MAX_RESULT_BYTES)
+        self.assertGreater(result_size_bytes(ascii_same_bytes), MAX_RESULT_BYTES)
+        # Same payload, same bytes, whatever the script: the thresholds agree.
+        self.assertEqual(result_size_bytes(cjk), result_size_bytes(ascii_same_bytes))
+
+    def test_a_small_result_is_measured_in_bytes_not_in_objects(self):
+        self.assertLess(result_size_bytes({"rows": []}), MAX_RESULT_BYTES)
 
 
 class RunSessionTests(unittest.TestCase):

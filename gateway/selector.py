@@ -86,6 +86,12 @@ RANKED = "bm25"
 #: prose.
 INDEX_VARIANTS = ("name", "description", "enriched")
 
+#: How many distinct corpora one selector keeps indexed. A static catalogue
+#: needs exactly one; the bound exists because a re-declaring upstream produces
+#: a new corpus per turn (see ``Selector._index``) and an unbounded dict would
+#: then be a slow leak in a long-lived gateway process.
+_INDEX_CACHE_LIMIT = 8
+
 _SPLIT_CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _WORD = re.compile(r"[a-z0-9]+")
 
@@ -289,19 +295,27 @@ class Selector:
     # -- index -------------------------------------------------------------
 
     def _index(self, entries: Sequence[object]) -> BM25:
-        key = tuple(getattr(entry, "exposed_name", "") for entry in entries)
+        docs: Dict[str, List[str]] = {}
+        for entry in entries:
+            name = str(getattr(entry, "exposed_name", ""))
+            docs[name] = tool_document(
+                entry, variant=self.variant, subjects=self._subjects.get(name, ())
+            )
+        # The cache key is the **corpus**, not the names. Keyed on names alone
+        # the index outlived the text it was built from: an upstream that
+        # re-declares a tool (same name, new description -- exactly what a
+        # schema-drift server does, and what a second ``tools/list`` looks like)
+        # kept its old rank, and the gate went on ranking a catalogue that no
+        # longer existed. Tokenizing thirty short documents per turn costs less
+        # than a cache that can lie.
+        key = tuple(sorted((name, tuple(tokens)) for name, tokens in docs.items()))
         index = self._cache.get(key)
         if index is None:
-            docs = {
-                str(getattr(entry, "exposed_name", "")): tool_document(
-                    entry,
-                    variant=self.variant,
-                    subjects=self._subjects.get(
-                        str(getattr(entry, "exposed_name", "")), ()
-                    ),
-                )
-                for entry in entries
-            }
+            if len(self._cache) >= _INDEX_CACHE_LIMIT:
+                # A drifting upstream produces a new corpus per turn; without a
+                # bound the cache would grow for the life of the process. FIFO
+                # on insertion order, so eviction is deterministic and readable.
+                self._cache.pop(next(iter(self._cache)))
             index = BM25(docs)
             self._cache[key] = index
         return index

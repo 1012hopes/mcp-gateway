@@ -62,6 +62,7 @@ __all__ = [
     "digest_result",
     "new_run_id",
     "new_session_id",
+    "result_size_bytes",
 ]
 
 
@@ -80,6 +81,22 @@ def digest_result(payload: Any) -> str:
 #: payload is not a complete evidence item, otherwise a half-returned row set
 #: reads as "evidence present" and the run halts early (DESIGN 2.6 pitfall 2).
 MAX_RESULT_BYTES = 1_000_000
+
+
+def result_size_bytes(payload: Any) -> int:
+    """How big the result is, in **bytes** -- the unit the constant's name claims.
+
+    The check used to be ``len(repr(payload))``, which counts *characters*: a
+    1.2 MB page of Chinese read as 400 k and was not flagged, while the same
+    size of ASCII was. Same threshold, two different answers depending on the
+    script -- and the failure direction is the bad one, since an unflagged
+    partial result is what makes R4 claim completion.
+
+    ``repr`` is the rendering rather than JSON on purpose: it cannot fail on a
+    payload the digest step is about to accept or reject, and this is a size
+    guard, not a serializer.
+    """
+    return len(repr(payload).encode("utf-8"))
 
 #: States from which no further call may be served.
 #:

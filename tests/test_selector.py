@@ -189,6 +189,45 @@ class WindowTests(unittest.TestCase):
         self.assertNotIn("sqlite.query", window.names)
 
 
+class IndexFreshnessTests(unittest.TestCase):
+    """A cached index must never answer for text that no longer exists.
+
+    The cache was keyed on the tool *names*, so an upstream that re-declared a
+    tool -- same name, different description, which is what ``tools/list`` is
+    asked again for and what a schema-drift server does -- kept the old rank.
+    Measured before the fix: two tools swapped their descriptions and the
+    ranking did not move.
+    """
+
+    def swapped_entries(self):
+        return [
+            tool("wiki.search", "Search wiki pages by words in the title or body."),
+            tool("gh.search", "Search repositories for code and commits."),
+        ]
+
+    def test_a_redeclared_tool_is_ranked_by_its_new_text(self):
+        selector = Selector(k=1, m=1)
+        entries = self.swapped_entries()
+        self.assertEqual(selector.window("find repositories with commits", entries).names[0], "gh.search")
+
+        entries[0] = tool("wiki.search", "Search repositories and commits by keyword.")
+        entries[1] = tool("gh.search", "Search wiki pages by title or body.")
+        self.assertEqual(selector.window("find repositories with commits", entries).names[0], "wiki.search")
+
+    def test_eviction_does_not_change_an_answer(self):
+        # The cache is bounded (an unbounded one is a leak in a long-lived
+        # process), so the same corpus must rank the same after the eviction
+        # that a few other corpora caused in between.
+        selector = Selector(k=1, m=1)
+        entries = self.swapped_entries()
+        first = selector.window("find repositories with commits", entries).names
+        for i in range(12):
+            noise = [tool(f"noise{i}.one", f"unrelated corpus number {i}")]
+            selector.window("unrelated", noise)
+        again = selector.window("find repositories with commits", entries).names
+        self.assertEqual(first, again)
+
+
 class ConfigurationTests(unittest.TestCase):
     def test_impossible_configurations_are_rejected(self):
         with self.assertRaises(ValueError):

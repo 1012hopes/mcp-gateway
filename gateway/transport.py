@@ -52,7 +52,7 @@ from .evidence import EvidenceModel
 from .limits import CallSignature
 from .registry import Registry, ToolEntry, build_registry
 from .selector import Selector, Window, sticky_seed
-from .session import MAX_RESULT_BYTES, RunSession, digest_result
+from .session import MAX_RESULT_BYTES, RunSession, digest_result, result_size_bytes
 from .stop import POST, PRE, StopContext, StopController, StopVerdict, merge_checks
 from .trace.sink import TraceChainError, TraceWriteError
 from .upstream import StdioUpstream, UpstreamFailure, tail_of_exception
@@ -597,7 +597,7 @@ class Gateway:
             # that counted as evidence would halt the run on a false completion
             # (DESIGN 2.6 pitfall 2). Computing the flag later would leave the
             # extractor reading a partial body as if it were whole.
-            truncated = len(repr(payload)) > MAX_RESULT_BYTES
+            truncated = result_size_bytes(payload) > MAX_RESULT_BYTES
             pending_evidence = self.evidence_model.extract(
                 payload, tool=chosen, args=args, truncated=truncated
             )

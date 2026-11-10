@@ -13,6 +13,8 @@ from gateway.trace.verify import (
     REASON_HASH_MISMATCH,
     REASON_JSON_PARSE,
     REASON_MISSING_FIELD,
+    REASON_NON_CANONICAL,
+    REASON_NOT_UTF8,
     REASON_PREV_HASH_MISMATCH,
     REASON_SEQ_GAP,
     REASON_UNSUPPORTED_SCHEMA,
@@ -248,6 +250,72 @@ class FileTests(unittest.TestCase):
         self.assertEqual(payload["records"], STEPS)
         self.assertTrue(payload["ok"])
         json.dumps(payload)  # must be JSON-safe
+
+
+class DamagedFileTests(unittest.TestCase):
+    """The verifier must report a damaged file, never be damaged by one.
+
+    Both cases below used to raise out of ``verify_path`` -- a traceback instead
+    of a line number, from the one program whose entire job is to answer "is
+    this file intact". Found by fuzzing 4000 type-mutated records (one crash
+    class) and by writing a byte that is not UTF-8 (one), not by reading the
+    code.
+    """
+
+    def test_a_non_finite_number_is_reported_as_unverifiable_not_as_tampering(self):
+        # Python's json parser accepts NaN, so this line *is* valid JSON -- it
+        # just cannot be re-serialized, which means there is no digest to
+        # compare. Claiming hash_mismatch would assert evidence it does not have.
+        record = json.loads(as_lines(build_records(1))[0])
+        record["latency_ms"] = float("nan")
+        result = verify_lines([json.dumps(record)])
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, REASON_NON_CANONICAL)
+        self.assertEqual(result.first_bad_line, 1)
+        self.assertIn("不可验证", result.detail)
+
+    def test_bytes_that_are_not_utf8_are_reported_on_their_own_line(self):
+        lines = as_lines(build_records(3))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mixed.jsonl"
+            path.write_bytes(
+                "\n".join(lines[:2]).encode("utf-8")
+                + b"\n"
+                + b'{"seq":3,"x":"\xff"}\n'
+            )
+            result = verify_path(path)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, REASON_NOT_UTF8)
+        self.assertEqual(result.first_bad_line, 3)
+        # Two records were verified before the corruption; saying 0 would leave
+        # a reviewer unable to tell how much of the file still holds.
+        self.assertEqual(result.records, 2)
+        self.assertIn("0xff", result.detail)
+
+    def test_a_bad_byte_on_the_first_line_is_still_a_line_number(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "first.jsonl"
+            path.write_bytes(b"\x80" + "\n".join(as_lines(build_records(2))).encode())
+            result = verify_path(path)
+        self.assertEqual(result.reason, REASON_NOT_UTF8)
+        self.assertEqual(result.first_bad_line, 1)
+        self.assertEqual(result.records, 0)
+
+    def test_an_earlier_break_wins_over_a_later_bad_byte(self):
+        # Line 1 is valid UTF-8 and invalid *as a record* (no hash links to it);
+        # line 2 has the bad byte. The first thing wrong with the file is line 1,
+        # and reporting the byte would move the diagnosis downstream of the cause.
+        lines = as_lines(build_records(2))
+        broken_first = json.loads(lines[0])
+        broken_first["prev_hash"] = "0" * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "both.jsonl"
+            path.write_bytes(
+                json.dumps(broken_first).encode("utf-8") + b"\n\xff\n"
+            )
+            result = verify_path(path)
+        self.assertEqual(result.first_bad_line, 1)
+        self.assertEqual(result.reason, REASON_PREV_HASH_MISMATCH)
 
 
 if __name__ == "__main__":

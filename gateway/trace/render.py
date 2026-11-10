@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-from .verify import VerifyResult, verify_lines
+from .verify import VerifyResult, decode_trace, verify_lines
 
 __all__ = [
     "STATUS_OK",
@@ -162,11 +162,19 @@ def _split_lines(text: str) -> List[str]:
 
 
 def load_replay(path: Union[str, Path]) -> Replay:
-    """Parse a trace file and mark every line with its verification status."""
+    """Parse a trace file and mark every line with its verification status.
+
+    The bytes are decoded by ``verify.decode_trace`` rather than here: the page
+    prints a verdict next to the steps, and two decoders would eventually
+    disagree about *which* line is broken -- the one thing this page exists to
+    show. A file that is not UTF-8 is still drawn (the bad line as replacement
+    characters) because refusing to render it would hide the evidence behind
+    the verdict.
+    """
     source = Path(path)
-    text = source.read_text(encoding="utf-8")
+    text, failure = decode_trace(source.read_bytes())
     lines = _split_lines(text)
-    verdict = verify_lines(lines)
+    verdict = failure if failure is not None else verify_lines(lines)
 
     steps: List[Step] = []
     for index, raw in enumerate(lines, 1):

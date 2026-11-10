@@ -22,12 +22,13 @@ assume a green result means "nothing is missing".
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
-from .canonical import canonical_bytes
+from .canonical import NonCanonicalValue, canonical_bytes
 from .record import CURRENT_SCHEMA_VERSION, PAYLOAD_FIELDS_V1, genesis_hash
 
 __all__ = [
@@ -38,11 +39,14 @@ __all__ = [
     "REASON_SEQ_GAP",
     "REASON_PREV_HASH_MISMATCH",
     "REASON_HASH_MISMATCH",
+    "REASON_NON_CANONICAL",
+    "REASON_NOT_UTF8",
     "REASON_UNSUPPORTED_SCHEMA",
     "REASON_MISSING_FIELD",
     "REASON_TYPE_ERROR",
     "REASON_STOP_CHECK_INCOMPLETE",
     "REASON_EMPTY",
+    "decode_trace",
     "verify_lines",
     "verify_path",
     "record_hash",
@@ -55,6 +59,13 @@ REASON_MISSING_SEQ = "missing_seq"
 REASON_SEQ_GAP = "seq_gap"
 REASON_PREV_HASH_MISMATCH = "prev_hash_mismatch"
 REASON_HASH_MISMATCH = "hash_mismatch"
+#: The bytes parse as JSON but cannot be re-serialized canonically (``NaN``,
+#: ``Infinity``). Distinct from ``hash_mismatch`` on purpose: nothing was proved
+#: about the writer, only that this record cannot be checked at all.
+REASON_NON_CANONICAL = "non_canonical"
+#: The file is not UTF-8 where a record should be. Not a JSON error: the reader
+#: must not blame the syntax for bytes the writer never wrote.
+REASON_NOT_UTF8 = "not_utf8"
 REASON_UNSUPPORTED_SCHEMA = "unsupported_schema_version"
 REASON_MISSING_FIELD = "missing_field"
 REASON_TYPE_ERROR = "type_error"
@@ -292,7 +303,24 @@ def verify_lines(lines: Iterable[str]) -> VerifyResult:
                 records=records,
             )
 
-        recomputed = record_hash(data)
+        # The line *is* JSON -- Python's parser accepts ``NaN``/``Infinity`` --
+        # but it cannot be re-serialized, so there is no digest to compare. This
+        # sits where the recompute happens rather than in a separate pass: L1 is
+        # "were these bytes modified", and a record that cannot be hashed is a
+        # fact about these bytes. Reporting ``hash_mismatch`` would claim
+        # evidence of tampering this check does not have; crashing -- which it
+        # did before a fuzz run of 4000 mutated records turned up one -- would
+        # let ``verify`` be taken down by the very file it exists to judge.
+        try:
+            recomputed = record_hash(data)
+        except NonCanonicalValue as exc:
+            return _fail(
+                reason=REASON_NON_CANONICAL,
+                line_no=line_no,
+                seq=seq,
+                detail=f"记录含无法规范化的值：{exc}；无法重算哈希，这条不可验证",
+                records=records,
+            )
         if recomputed != data.get("hash"):
             stored = str(data.get("hash", ""))
             return _fail(
@@ -329,6 +357,63 @@ def verify_lines(lines: Iterable[str]) -> VerifyResult:
     return VerifyResult(ok=True, records=records, notes=[TAIL_NOTE])
 
 
+def decode_trace(data: bytes) -> Tuple[str, Optional[VerifyResult]]:
+    """Decode a trace file's bytes, or say exactly which line stopped being UTF-8.
+
+    A trace is written as UTF-8 by a process holding the only writer position, so
+    bytes that are not UTF-8 were not written by it: the file is corrupt, was
+    truncated mid-character by a killed writer, or is not a trace at all. Two
+    wrong answers were rejected:
+
+    * **raise** -- ``verify`` then dies on the file it exists to judge, and the
+      caller gets a traceback instead of a line number (this is what it did);
+    * **replace and let the JSON parser complain** -- reports ``col 1`` on the
+      *replaced* text, blaming the syntax for bytes the writer never wrote.
+
+    Counting newlines up to the exact byte offset puts the failure on the line
+    the bad byte is on, and the records before it are verified for real -- a
+    reviewer wants to know how much of the file is still trustworthy.
+
+    Returns ``(text, None)`` when the bytes are UTF-8, else the replacement-
+    decoded text (for display) plus the failure.
+    """
+    try:
+        return data.decode("utf-8"), None
+    except UnicodeDecodeError as exc:
+        line_start = data.rfind(b"\n", 0, exc.start) + 1
+        line_no = data.count(b"\n", 0, exc.start) + 1
+        column = exc.start - line_start + 1
+        bad = data[exc.start : exc.start + 1]
+
+        text = data.decode("utf-8", errors="replace")
+        records = 0
+        if line_start:
+            # Everything before this line is valid UTF-8 by construction. If it
+            # already fails, *that* is the first bad record, not this byte.
+            prefix = verify_lines(io.StringIO(data[:line_start].decode("utf-8")))
+            if not prefix.ok:
+                return text, prefix
+            records = prefix.records
+
+        return text, _fail(
+            reason=REASON_NOT_UTF8,
+            line_no=line_no,
+            seq=None,
+            detail=(
+                f"第 {line_no} 行第 {column} 字节不是合法 UTF-8"
+                f"（0x{bad.hex() if bad else 'EOF'}）：这串字节不是写入者写下的，"
+                "可能是写到一半被杀掉，或文件被别的工具转过码"
+            ),
+            records=records,
+        )
+
+
 def verify_path(path: Union[str, Path]) -> VerifyResult:
-    with open(path, "r", encoding="utf-8") as handle:
-        return verify_lines(handle)
+    """Verify a file. Anything a damaged file can do to it is reported, not raised."""
+    data = Path(path).read_bytes()
+    text, failure = decode_trace(data)
+    if failure is not None:
+        return failure
+    # ``StringIO`` iterates like a file opened in text mode, so CRLF and lone CR
+    # keep splitting exactly as they did when this function passed a handle.
+    return verify_lines(io.StringIO(text))

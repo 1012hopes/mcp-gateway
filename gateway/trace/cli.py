@@ -3,11 +3,14 @@
     python -m gateway.trace verify traces/samples/demo-12-steps.jsonl
     python -m gateway.trace render traces/runs/run-104d434f33a4.jsonl
 
-Exit codes: 0 = chain intact (or page written), 1 = verification failed, 2 =
-usage error. The non-zero code matters: it is what a CI step or a demo script
-checks. ``render`` returns 0 even for a broken chain -- a broken trace is
-exactly the thing you want to look at, and refusing to draw it would hide the
-evidence behind the verdict.
+Exit codes: 0 = chain intact (or page written), 1 = verification failed, 2 = the
+path could not be read *or* the command line is wrong. The distinction is the
+reason there are three: a CI gate that treats every non-zero code as "tampered"
+would report a missing file as tampering, so "I could not read this" gets its own
+code instead of borrowing exit 1. (It used to borrow it, and to answer a
+directory with a traceback.) ``render`` returns 0 even for a broken chain -- a
+broken trace is exactly the thing you want to look at, and refusing to draw it
+would hide the evidence behind the verdict.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from .verify import verify_path
 
 EXIT_OK = 0
 EXIT_FAIL = 1
+EXIT_USAGE = 2
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -55,10 +59,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.command == "verify":
         try:
             result = verify_path(args.path)
-        except FileNotFoundError:
+        except OSError as exc:
+            # Missing, a directory, a permission denial, a path too long: the
+            # user named something this tool cannot read. A traceback is not an
+            # answer, and exit 1 would say "the chain is broken" -- a statement
+            # about the file, made without having read it.
             if not args.quiet:
-                print(f"找不到文件: {args.path}", file=sys.stderr)
-            return EXIT_FAIL
+                reason = exc.strerror or str(exc)
+                print(f"打不开这个路径: {args.path}（{reason}）", file=sys.stderr)
+            return EXIT_USAGE
 
         if not args.quiet:
             if args.json:
@@ -75,14 +84,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             out = render_path(args.path, args.out, title=args.title)
             result = verify_path(args.path)
-        except FileNotFoundError:
-            print(f"找不到文件: {args.path}", file=sys.stderr)
-            return EXIT_FAIL
+        except OSError as exc:
+            reason = exc.strerror or str(exc)
+            print(f"打不开这个路径: {args.path}（{reason}）", file=sys.stderr)
+            return EXIT_USAGE
         print(f"写出 {out}（{out.stat().st_size} 字节，双击打开）")
         print(f"  链状态: {result.summary()}")
         return EXIT_OK
 
-    return 2
+    return EXIT_USAGE
 
 
 if __name__ == "__main__":  # pragma: no cover

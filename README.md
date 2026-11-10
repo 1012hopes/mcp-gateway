@@ -58,7 +58,7 @@ recursion_limit = 25  # LangGraph
 
 ```bash
 # 全量测试必须在虚拟环境里跑：需要 SDK 的用例会在裸解释器上 skip
-# （355 跑 / 140 skip / 0 error），但虚拟环境里它们是真跑。
+# （415 跑 / 141 skip / 0 error），但虚拟环境里它们是真跑。
 uv run python -m unittest discover -s tests -t .
 
 # 端到端：agent -> 网关 -> sqlite 上游 -> 轨迹落盘 -> verify

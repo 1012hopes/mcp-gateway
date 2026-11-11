@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 from typing import List, Optional
 
 from .render import render_path
@@ -50,6 +51,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "-o", "--out", default=None, help="output .html (default: next to the trace)"
     )
     render.add_argument("--title", default=None, help="page title")
+
+    serve = sub.add_parser(
+        "serve", help="浏览一个目录里的所有轨迹（只读，绑定 127.0.0.1）"
+    )
+    serve.add_argument("--dir", default="traces", help="要浏览的目录（默认 traces）")
+    serve.add_argument(
+        "--port", type=int, default=0, help="端口（默认 0 = 让系统分配一个空闲的）"
+    )
+    serve.add_argument("--no-open", action="store_true", help="不要自动打开浏览器")
     return parser
 
 
@@ -90,6 +100,23 @@ def main(argv: Optional[List[str]] = None) -> int:
             return EXIT_USAGE
         print(f"写出 {out}（{out.stat().st_size} 字节，双击打开）")
         print(f"  链状态: {result.summary()}")
+        return EXIT_OK
+
+    if args.command == "serve":
+        # Imported here rather than at module scope: ``serve`` pulls in the
+        # HTTP server and subprocess machinery, and ``verify``/``render`` are
+        # used in CI where neither is wanted.
+        from .serve import serve
+
+        root = Path(args.dir)
+        if not root.is_dir():
+            print(f"不是一个目录: {root}", file=sys.stderr)
+            return EXIT_USAGE
+        try:
+            serve(root, port=args.port, open_browser=not args.no_open)
+        except OSError as exc:
+            print(f"起不来: {exc}", file=sys.stderr)
+            return EXIT_USAGE
         return EXIT_OK
 
     return EXIT_USAGE

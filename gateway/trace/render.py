@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
+from .theme import BASE_CSS
 from .verify import VerifyResult, decode_trace, verify_lines
 
 __all__ = [
@@ -419,17 +420,11 @@ def _kv_rows_html(step: Step) -> str:
 
 # -- the page -------------------------------------------------------------
 
-CSS = """
-*,*::before,*::after{box-sizing:border-box}
-:root{
-  --bg:#f7f5f0; --panel:#fffefb; --ink:#1c1c1e; --muted:#6c6a66; --line:#e0dbd1;
-  --accent:#0b6b5b; --accent-soft:#e4f1ee; --bad:#b3261e; --bad-soft:#fbe9e7;
-  --warn:#8a5a00; --warn-soft:#fbf0da; --rule:#3d4e8a; --rule-soft:#e8ebf6;
-}
-html,body{margin:0;background:var(--bg);color:var(--ink)}
-body{font:15px/1.55 -apple-system,"Segoe UI","Noto Sans SC",system-ui,sans-serif;padding:0 0 3rem}
-code,pre,.mono{font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace;font-size:12.5px}
-header.page{padding:1.4rem 1.6rem 1rem;border-bottom:1px solid var(--line);background:var(--panel)}
+CSS = BASE_CSS + """
+body{padding:0 0 3rem}
+header.page{padding:1.4rem 1.6rem 1rem;border-bottom:1px solid var(--line);
+  background:rgba(255,255,255,.78);-webkit-backdrop-filter:blur(16px) saturate(150%);
+  backdrop-filter:blur(16px) saturate(150%);box-shadow:var(--shadow-sm)}
 header.page h1{margin:0 0 .3rem;font-size:1.18rem;letter-spacing:.01em}
 .sub{color:var(--muted);font-size:13px}
 .verdict{display:inline-block;margin-top:.6rem;padding:.15rem .6rem;border-radius:999px;
@@ -439,7 +434,8 @@ header.page h1{margin:0 0 .3rem;font-size:1.18rem;letter-spacing:.01em}
 .legend{margin-top:.7rem;font-size:12.5px;color:var(--muted);display:flex;gap:1rem;flex-wrap:wrap}
 .legend b{font-weight:600;color:var(--ink)}
 main{display:grid;grid-template-columns:minmax(240px,320px) minmax(0,1fr);gap:0;align-items:start}
-nav.steps{position:sticky;top:0;max-height:100vh;overflow:auto;padding:.8rem;border-right:1px solid var(--line)}
+nav.steps{position:sticky;top:0;max-height:100vh;overflow:auto;padding:.8rem;border-right:1px solid var(--line);
+  background:rgba(255,255,255,.55);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}
 nav.steps h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:.2rem .4rem .6rem}
 .step{display:block;width:100%;text-align:left;margin:0 0 .28rem;padding:.42rem .55rem;border-radius:7px;
   border:1px solid transparent;background:transparent;color:inherit;cursor:pointer;font:inherit}
@@ -453,14 +449,16 @@ nav.steps h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:
 .step.status-after .tool{color:var(--muted);text-decoration:line-through}
 .step.is-r4{box-shadow:inset 3px 0 0 var(--accent)}
 section.cards{padding:1rem 1.2rem;min-width:0}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:1rem 1.1rem;margin:0 0 1rem}
+.card{background:var(--panel);border:1px solid rgba(255,255,255,.62);border-radius:var(--radius);
+  padding:1rem 1.1rem;margin:0 0 1rem;box-shadow:var(--shadow-sm),var(--shadow-md);
+  -webkit-backdrop-filter:blur(14px) saturate(150%);backdrop-filter:blur(14px) saturate(150%)}
 .card h2{margin:0;font-size:1rem}
 .card h3{margin:.9rem 0 .35rem;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
 .card-head{display:flex;justify-content:space-between;gap:.8rem;align-items:center;flex-wrap:wrap;
   padding-bottom:.6rem;border-bottom:1px solid var(--line)}
-.card.status-bad{border-color:var(--bad);box-shadow:0 0 0 1px var(--bad) inset}
+.card.status-bad{border-color:var(--bad);box-shadow:0 0 0 1px var(--bad) inset,var(--shadow-md)}
 .card.status-after{opacity:.72}
-.card.is-r4{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+.card.is-r4{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset,var(--shadow-md)}
 .badges{display:flex;gap:.35rem;flex-wrap:wrap}
 .badge{font-size:11.5px;padding:.1rem .45rem;border-radius:999px;border:1px solid;white-space:nowrap}
 .badge-accent{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
@@ -488,7 +486,9 @@ p{margin:.3rem 0}
   border-radius:8px;padding:.5rem .6rem;font-size:13px}
 pre.raw{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:.5rem;overflow:auto}
 .muted{color:var(--muted)}
-.band{position:sticky;bottom:0;background:var(--panel);border-top:1px solid var(--line);
+.band{position:sticky;bottom:0;background:rgba(255,255,255,.82);
+  -webkit-backdrop-filter:blur(16px) saturate(160%);backdrop-filter:blur(16px) saturate(160%);
+  border-top:1px solid var(--line);box-shadow:0 -8px 24px -18px rgba(16,24,40,.45);
   padding:.7rem 1.2rem;display:flex;gap:1rem;align-items:center;flex-wrap:wrap;font-size:12.5px}
 .band h2{margin:0;font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
 .band ul{list-style:none;display:flex;gap:.35rem;flex-wrap:wrap;margin:0;padding:0}
@@ -498,6 +498,8 @@ pre.raw{background:var(--bg);border:1px solid var(--line);border-radius:8px;padd
 footer.page{padding:1rem 1.6rem;color:var(--muted);font-size:12px;border-top:1px solid var(--line)}
 body.js-on .card{display:none}
 body.js-on .card.active{display:block}
+a.back{display:inline-block;font-size:12.5px;color:var(--accent);text-decoration:none;margin-bottom:.5rem}
+a.back:hover{text-decoration:underline}
 """
 
 JS = """
@@ -596,8 +598,17 @@ def render_html(
     replay: Replay,
     *,
     title: Optional[str] = None,
+    back_href: Optional[str] = None,
 ) -> str:
-    """Render the whole page. Same input -> same bytes, always."""
+    """Render the whole page. Same input -> same bytes, always.
+
+    ``back_href`` exists for the served view (``trace/serve.py``), where the
+    page sits inside a directory listing and needs a way out. It defaults to
+    ``None``, and ``None`` emits nothing at all -- the file written by
+    ``render_path`` is byte-identical to what it was before this parameter
+    existed, because that file is meant to be mailed as an attachment and must
+    not depend on having a server behind it.
+    """
     steps = replay.steps
     cumulative = _cumulative_evidence(steps)
     verdict = replay.verdict
@@ -633,6 +644,9 @@ def render_html(
     notes_block = f'<ul class="notes">{notes}</ul>' if notes else ""
 
     heading = title or f"回放：{Path(replay.source).name}"
+    back = (
+        f'<a class="back" href="{_e(back_href)}">← 全部轨迹</a>\n  ' if back_href else ""
+    )
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -644,7 +658,7 @@ def render_html(
 </head>
 <body>
 <header class="page">
-  <h1>{_e(heading)}</h1>
+  {back}<h1>{_e(heading)}</h1>
   <div class="sub">来源 <code>{_e(Path(replay.source).name)}</code> · {len(steps)} 步 · {_e(_summary_line(replay))}</div>
   <div class="verdict {verdict_class}">{_e(verdict_text)}</div>
   <dl class="kv" style="margin-top:.8rem">{meta_rows}</dl>
